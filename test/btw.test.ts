@@ -22,7 +22,6 @@ type Terminal = {
 	setTitle(title: string): void;
 };
 import { BtwOverlayBridge, BtwOverlayComponent, attachOverlayBridge, cursorMarkerPresent, type BtwOverlayView } from "../overlay.js";
-import { classifyMcpTool, requiresMcpMutationApproval } from "../mcp-policy.js";
 import { buildMainSessionContext, DEFAULT_MAIN_SESSION_RECENT_LIMIT } from "../main-context.js";
 import { createBtwSessionRef, readBtwSessionRef, BTW_SESSION_REF_CUSTOM_TYPE } from "../session-ref.js";
 import { BtwSideSessionRuntime, createSideSessionFile } from "../side-session.js";
@@ -89,7 +88,7 @@ const overlayView: BtwOverlayView = {
 	isReady: () => true,
 	isStreaming: () => false,
 	getModelLabel: () => "faux/test-model",
-	getModeLabel: () => "read-only",
+	getModeLabel: () => "advisory only",
 	getDisplayEntries: () => [{ kind: "assistant", text: "hello from /btw" }],
 	sendMessage: async () => {},
 };
@@ -106,26 +105,6 @@ async function testSessionRef(): Promise<void> {
 	]);
 	assert.deepEqual(loaded, ref);
 	assert.equal(readBtwSessionRef([]), undefined);
-}
-
-async function testMcpPolicy(): Promise<void> {
-	assert.equal(classifyMcpTool({ name: "get_document", description: "Read-only document lookup" }), "read-only");
-	assert.equal(classifyMcpTool({ name: "update_document", description: "Writes changes back" }), "mutation");
-	assert.equal(classifyMcpTool({ name: "mystery_tool", description: "Does something" }), "unknown");
-
-	assert.equal(
-		requiresMcpMutationApproval({ search: "document" }, { name: "get_document", description: "Read-only" }),
-		false,
-	);
-	assert.equal(
-		requiresMcpMutationApproval({ tool: "get_document" }, { name: "get_document", description: "Read-only" }),
-		false,
-	);
-	assert.equal(
-		requiresMcpMutationApproval({ tool: "update_document" }, { name: "update_document", description: "Writes changes" }),
-		true,
-	);
-	assert.equal(requiresMcpMutationApproval({ tool: "mystery_tool" }, undefined), true);
 }
 
 async function testOverlayFocusAndEscRouting(): Promise<void> {
@@ -294,6 +273,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			mainContextProvider: () => currentMainContext,
 			themeProvider: () => theme,
 		});
+		assert.equal(runtime.getModeLabel(), "advisory only", "/btw should stay in advisory-only mode");
 
 		type BeforeAgentStartResult = { systemPrompt?: string };
 		type RuntimeProbe = {
@@ -321,6 +301,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			firstSystemPrompt.includes("Communication permissions to the main agent via followUp / steer are controlled separately and may be enabled or disabled."),
 			"/btw addendum should describe separate followUp / steer permissions",
 		);
+		assert.ok(!firstSystemPrompt.includes("btw_request_write_access"), "/btw prompt should not reference the removed mutation approval tool");
 		assert.ok(firstSystemPrompt.includes(currentMainContext.summaryText), "/btw prompt should inject the current main-session summary");
 		assert.ok(firstSystemPrompt.includes(currentMainContext.recentText), "/btw prompt should inject the current recent main-session window");
 
@@ -551,7 +532,6 @@ async function testBuildMainSessionContext(): Promise<void> {
 
 async function main(): Promise<void> {
 	await testSessionRef();
-	await testMcpPolicy();
 	await testOverlayFocusAndEscRouting();
 	await testOverlayRenderDistinctness();
 	await testSideSessionPersistence();

@@ -149,10 +149,8 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.queuedMessages = [];
 		state.mainSession.reset(formatModelLabel(state.model));
 		refreshMainContext(state);
-		state.bridge.cancelPending();
 	});
 }
-
 function updateContextState(pi: ExtensionAPI, state: MainState, ctx: ExtensionContext): void {
 	state.model = ctx.model;
 	state.thinkingLevel = pi.getThinkingLevel();
@@ -180,7 +178,7 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 		isReady: () => state.runtime?.isReady() ?? false,
 		isStreaming: () => state.runtime?.isStreaming() ?? false,
 		getModelLabel: () => state.runtime?.getModelLabel() ?? formatModelLabel(state.model),
-		getModeLabel: () => state.runtime?.getModeLabel() ?? "read-only",
+		getModeLabel: () => state.runtime?.getModeLabel() ?? "advisory only",
 		getDisplayEntries: () => getOverlayEntries(state),
 		sendMessage: async (text: string) => {
 			queueMessage(state, text);

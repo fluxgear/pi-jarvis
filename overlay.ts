@@ -15,11 +15,6 @@ export interface BtwOverlayView {
 	sendMessage(text: string): Promise<void>;
 }
 
-export interface MutationApprovalRequest {
-	title: string;
-	message: string;
-}
-
 type NotificationType = "info" | "warning" | "error";
 
 interface NotificationItem {
@@ -28,34 +23,22 @@ interface NotificationItem {
 	timestamp: number;
 }
 
-interface PendingApproval {
-	request: MutationApprovalRequest;
-	resolve: (approved: boolean) => void;
-}
-
 export interface BtwOverlaySnapshot {
 	statuses: string[];
 	notifications: NotificationItem[];
 	workingMessage?: string;
-	pendingApproval?: MutationApprovalRequest;
-	mutationAccessGranted: boolean;
 }
 
 export class BtwOverlayBridge {
 	private requestRender?: () => void;
 	private statuses = new Map<string, string>();
 	private notifications: NotificationItem[] = [];
-	private pendingApproval?: PendingApproval;
 	private workingMessage?: string;
-	private mutationAccessGranted = false;
 
 	reset(): void {
-		this.pendingApproval?.resolve(false);
 		this.statuses.clear();
 		this.notifications = [];
-		this.pendingApproval = undefined;
 		this.workingMessage = undefined;
-		this.mutationAccessGranted = false;
 		this.emit();
 	}
 
@@ -90,51 +73,12 @@ export class BtwOverlayBridge {
 		this.emit();
 	}
 
-	setMutationAccessGranted(granted: boolean): void {
-		this.mutationAccessGranted = granted;
-		this.emit();
-	}
-
-	async requestMutationApproval(request: MutationApprovalRequest): Promise<boolean> {
-		if (!this.requestRender) {
-			return false;
-		}
-		if (this.pendingApproval) {
-			this.pendingApproval.resolve(false);
-		}
-		return new Promise<boolean>((resolve) => {
-			this.pendingApproval = { request, resolve };
-			this.emit();
-		});
-	}
-
-	approvePending(): void {
-		this.resolvePending(true);
-	}
-
-	denyPending(): void {
-		this.resolvePending(false);
-	}
-
-	cancelPending(): void {
-		this.resolvePending(false);
-	}
-
 	snapshot(): BtwOverlaySnapshot {
 		return {
 			statuses: Array.from(this.statuses.values()),
 			notifications: [...this.notifications],
 			workingMessage: this.workingMessage,
-			pendingApproval: this.pendingApproval?.request,
-			mutationAccessGranted: this.mutationAccessGranted,
 		};
-	}
-
-	private resolvePending(approved: boolean): void {
-		const pending = this.pendingApproval;
-		this.pendingApproval = undefined;
-		pending?.resolve(approved);
-		this.emit();
 	}
 
 	private emit(): void {
@@ -167,30 +111,11 @@ export class BtwOverlayComponent implements Component, Focusable {
 			void this.view.sendMessage(message);
 		};
 		this.input.onEscape = () => {
-			this.bridge.cancelPending();
 			this.close();
 		};
 	}
 
 	handleInput(data: string): void {
-		const snapshot = this.bridge.snapshot();
-		if (snapshot.pendingApproval) {
-			if (matchesKey(data, "escape")) {
-				this.bridge.denyPending();
-				this.close();
-				return;
-			}
-			if (matchesKey(data, "return") || data === "y" || data === "Y") {
-				this.bridge.approvePending();
-				return;
-			}
-			if (data === "n" || data === "N") {
-				this.bridge.denyPending();
-				return;
-			}
-			return;
-		}
-
 		if (matchesKey(data, "escape")) {
 			this.close();
 			return;
@@ -206,15 +131,12 @@ export class BtwOverlayComponent implements Component, Focusable {
 		const maxHeight = this.maxHeightProvider();
 		const innerWidth = Math.max(24, width - 4);
 		const snapshot = this.bridge.snapshot();
-		const reservedLines = 9 + this.notificationLines(snapshot.notifications, innerWidth).length + (snapshot.pendingApproval ? 5 : 0);
+		const notificationLines = this.notificationLines(snapshot.notifications, innerWidth);
+		const reservedLines = 9 + notificationLines.length;
 		const transcriptBudget = Math.max(4, maxHeight - reservedLines);
 		const transcriptLines = this.renderTranscript(innerWidth, transcriptBudget, snapshot);
-		const notificationLines = this.notificationLines(snapshot.notifications, innerWidth);
 		const inputLine = this.renderInputLine(innerWidth);
-		const footer = truncateToWidth(
-			`${this.theme.fg("dim", "enter send • esc close • request tool required before file/system mutations")}`,
-			innerWidth,
-		);
+		const footer = truncateToWidth(`${this.theme.fg("dim", "enter send • esc close")}`, innerWidth);
 
 		const body: string[] = [];
 		body.push(...this.renderHeader(innerWidth));
@@ -222,9 +144,6 @@ export class BtwOverlayComponent implements Component, Focusable {
 			body.push(...notificationLines);
 		}
 		body.push(...transcriptLines);
-		if (snapshot.pendingApproval) {
-			body.push(...this.renderApprovalPrompt(snapshot.pendingApproval, innerWidth));
-		}
 		body.push(this.theme.fg("accent", "Message"));
 		body.push(inputLine);
 		body.push(footer);
@@ -288,16 +207,6 @@ export class BtwOverlayComponent implements Component, Focusable {
 			default:
 				return this.wrapBlock(this.theme.fg("muted", entry.text), innerWidth);
 		}
-	}
-
-	private renderApprovalPrompt(request: MutationApprovalRequest, innerWidth: number): string[] {
-		const title = this.theme.bold(this.theme.fg("warning", request.title));
-		const messageLines = wrapTextWithAnsi(request.message, innerWidth - 2).map((line) => ` ${line}`);
-		return [
-			title,
-			...messageLines,
-			this.theme.fg("dim", " Enter/Y allow • N deny • Esc close overlay "),
-		];
 	}
 
 	private renderInputLine(innerWidth: number): string {

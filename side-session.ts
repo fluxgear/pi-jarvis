@@ -5,20 +5,11 @@ import {
 	DefaultResourceLoader,
 	SessionManager,
 	createAgentSession,
-	createBashTool,
-	createEditTool,
-	createFindTool,
-	createGrepTool,
-	createLsTool,
-	createReadTool,
-	createWriteTool,
 	getAgentDir,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
 import { BtwOverlayBridge, type BtwDisplayEntry, type BtwOverlayView } from "./overlay.js";
-import { type McpProxyRequest, requiresMcpMutationApproval } from "./mcp-policy.js";
 
 const SIDE_SYSTEM_PROMPT = `
 Authoritative /btw addendum:
@@ -30,77 +21,7 @@ Authoritative /btw addendum:
 - Use the injected main-session context to answer what is happening right now.
 `.trim();
 
-const SAFE_TOOL_NAMES = ["read", "grep", "find", "ls", "mcp", "btw_request_write_access"] as const;
-const MUTATING_TOOL_NAMES = ["bash", "edit", "write"] as const;
-
 type SideSessionHandle = Awaited<ReturnType<typeof createAgentSession>>["session"];
-
-type ToolMetadata = {
-	name: string;
-	description: string;
-};
-
-type McpExtensionState = {
-	toolMetadata: Map<string, ToolMetadata[]>;
-	uiServer: { close(reason: string): void } | null;
-	lifecycle: { gracefulShutdown(): Promise<void> };
-};
-
-type McpModules = {
-	loadMcpConfig: (configPath?: string) => unknown;
-	buildProxyDescription: (config: unknown, cache: unknown, directSpecs: unknown[]) => string;
-	loadMetadataCache: () => unknown;
-	initializeMcp: (pi: ExtensionAPI, ctx: ExtensionContext) => Promise<McpExtensionState>;
-	updateStatusBar: (state: McpExtensionState) => void;
-	flushMetadataCache: (state: McpExtensionState) => void;
-	executeCall: (state: McpExtensionState, tool: string, args?: Record<string, unknown>, server?: string) => Promise<any>;
-	executeConnect: (state: McpExtensionState, server: string) => Promise<any>;
-	executeDescribe: (state: McpExtensionState, tool: string) => Promise<any>;
-	executeList: (state: McpExtensionState, server: string) => Promise<any>;
-	executeSearch: (
-		state: McpExtensionState,
-		search: string,
-		regex?: boolean,
-		server?: string,
-		includeSchemas?: boolean,
-		getPiTools?: () => unknown[],
-	) => Promise<any>;
-	executeStatus: (state: McpExtensionState) => Promise<any>;
-	executeUiMessages: (state: McpExtensionState) => Promise<any>;
-	findToolByName: (metadata: ToolMetadata[] | undefined, toolName: string) => ToolMetadata | undefined;
-};
-
-let mcpModulesPromise: Promise<McpModules> | undefined;
-
-async function loadMcpModules(): Promise<McpModules> {
-	if (!mcpModulesPromise) {
-		const root = "pi-mcp-adapter";
-		mcpModulesPromise = Promise.all([
-			import(`${root}/config.js`),
-			import(`${root}/direct-tools.js`),
-			import(`${root}/init.js`),
-			import(`${root}/metadata-cache.js`),
-			import(`${root}/proxy-modes.js`),
-			import(`${root}/tool-metadata.js`),
-		]).then(([config, directTools, init, metadata, proxy, toolMetadata]) => ({
-			loadMcpConfig: config.loadMcpConfig,
-			buildProxyDescription: directTools.buildProxyDescription,
-			loadMetadataCache: metadata.loadMetadataCache,
-			initializeMcp: init.initializeMcp,
-			updateStatusBar: init.updateStatusBar,
-			flushMetadataCache: init.flushMetadataCache,
-			executeCall: proxy.executeCall,
-			executeConnect: proxy.executeConnect,
-			executeDescribe: proxy.executeDescribe,
-			executeList: proxy.executeList,
-			executeSearch: proxy.executeSearch,
-			executeStatus: proxy.executeStatus,
-			executeUiMessages: proxy.executeUiMessages,
-			findToolByName: toolMetadata.findToolByName,
-		}));
-	}
-	return mcpModulesPromise;
-}
 
 type SideRuntimeCreateOptions = {
 	bridge: BtwOverlayBridge;
@@ -171,7 +92,7 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 	}
 
 	getModeLabel(): string {
-		return this.bridge.snapshot().mutationAccessGranted ? "mutation approved" : "read-only";
+		return "advisory only";
 	}
 
 	getDisplayEntries(): BtwDisplayEntry[] {
@@ -235,7 +156,6 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 		this.unsubscribe = undefined;
 		this.session?.dispose();
 		this.session = undefined;
-		this.bridge.cancelPending();
 		this.bridge.detach();
 	}
 
@@ -248,7 +168,7 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 			cwd: options.cwd,
 			agentDir: getAgentDir(),
 			noExtensions: true,
-			extensionFactories: [createSideExtensionFactory(this.bridge, options.systemPromptProvider, options.mainContextProvider)],
+			extensionFactories: [createSideExtensionFactory(options.systemPromptProvider, options.mainContextProvider)],
 		});
 		await resourceLoader.reload();
 
@@ -258,15 +178,7 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 			modelRegistry: options.modelRegistry as any,
 			model: options.model,
 			thinkingLevel: options.thinkingLevel as any,
-			tools: [
-				createReadTool(options.cwd),
-				createBashTool(options.cwd),
-				createEditTool(options.cwd),
-				createWriteTool(options.cwd),
-				createGrepTool(options.cwd),
-				createFindTool(options.cwd),
-				createLsTool(options.cwd),
-			],
+			tools: [],
 			resourceLoader,
 			sessionManager: sideSessionManager,
 		});
@@ -352,51 +264,10 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 }
 
 function createSideExtensionFactory(
-	bridge: BtwOverlayBridge,
 	getMainSystemPrompt: SideRuntimeCreateOptions["systemPromptProvider"],
 	getMainContext: SideRuntimeCreateOptions["mainContextProvider"],
 ) {
 	return (pi: ExtensionAPI): void => {
-		let mcpState: McpExtensionState | null = null;
-		let initPromise: Promise<McpExtensionState> | null = null;
-		let mutationGranted = false;
-
-		const applyToolMode = () => {
-			const allowed = new Set<string>(SAFE_TOOL_NAMES);
-			if (mutationGranted) {
-				for (const name of MUTATING_TOOL_NAMES) {
-					allowed.add(name);
-				}
-			}
-			const available = new Set(pi.getAllTools().map((tool) => tool.name));
-			pi.setActiveTools(Array.from(allowed).filter((name) => available.has(name)));
-			bridge.setMutationAccessGranted(mutationGranted);
-		};
-
-		const ensureMcpReady = async (ctx?: ExtensionContext): Promise<McpExtensionState | null> => {
-			if (mcpState) {
-				return mcpState;
-			}
-			if (!initPromise) {
-				if (!ctx) {
-					return null;
-				}
-				initPromise = loadMcpModules()
-					.then((mcp) => mcp.initializeMcp(pi, ctx).then((state) => ({ mcp, state })))
-					.then(({ mcp, state }) => {
-						mcpState = state;
-						initPromise = null;
-						mcp.updateStatusBar(state);
-						return state;
-					})
-					.catch((error) => {
-						initPromise = null;
-						throw error;
-					});
-			}
-			return initPromise;
-		};
-
 		pi.on("before_agent_start", async () => {
 			const mainContext = getMainContext();
 			const systemPrompt = [
@@ -409,186 +280,6 @@ function createSideExtensionFactory(
 				.filter((section) => section.length > 0)
 				.join("\n\n");
 			return { systemPrompt };
-		});
-
-		pi.on("session_start", async (_event, ctx) => {
-			mutationGranted = false;
-			applyToolMode();
-			try {
-				await ensureMcpReady(ctx);
-			} catch (error) {
-				bridge.notify(`MCP initialization failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-			}
-		});
-
-		pi.on("agent_end", async () => {
-			if (mutationGranted) {
-				mutationGranted = false;
-				applyToolMode();
-			}
-		});
-
-		pi.on("tool_call", async (event) => {
-			if (mutationGranted) {
-				return;
-			}
-			if (event.toolName === "bash" || event.toolName === "edit" || event.toolName === "write") {
-				return {
-					block: true,
-					reason: "Mutation access not granted. Call btw_request_write_access first.",
-				};
-			}
-		});
-
-		pi.on("session_shutdown", async () => {
-			if (initPromise) {
-				try {
-					mcpState = await initPromise;
-				} catch {
-					// Ignore failed MCP startup.
-				}
-			}
-			if (mcpState) {
-				if (mcpState.uiServer) {
-					mcpState.uiServer.close("session_shutdown");
-					mcpState.uiServer = null;
-				}
-				const mcp = await loadMcpModules();
-				mcp.flushMetadataCache(mcpState);
-				await mcpState.lifecycle.gracefulShutdown();
-				mcpState = null;
-			}
-		});
-
-		pi.registerTool({
-			name: "btw_request_write_access",
-			label: "Request Write Access",
-			description: "Request temporary mutation access for the current /btw response.",
-			promptSnippet: "Request temporary write/system mutation permission for the current /btw response.",
-			promptGuidelines: [
-				"Call this before using bash, edit, write, or MCP tools that might mutate state.",
-			],
-			parameters: Type.Object({
-				reason: Type.String({ description: "Concise explanation of the proposed mutation." }),
-			}),
-			async execute(_toolCallId, params: { reason: string }) {
-				const approved = await bridge.requestMutationApproval({
-					title: "Allow /btw mutation access?",
-					message: params.reason,
-				});
-				mutationGranted = approved;
-				applyToolMode();
-				return {
-					content: [
-						{
-							type: "text",
-							text: approved
-								? "Mutation access granted for the current /btw response. You may now use bash, edit, write, and approved MCP mutations until this response completes."
-								: "Mutation access denied. The /btw agent remains read-only.",
-						},
-					],
-					details: { approved, reason: params.reason },
-				};
-			},
-		});
-
-		pi.registerTool({
-			name: "mcp",
-			label: "MCP",
-			description: "MCP gateway - connect to MCP servers and call their tools.",
-			promptSnippet: "MCP gateway - connect to MCP servers and call their tools.",
-			parameters: Type.Object({
-				tool: Type.Optional(Type.String({ description: "Tool name to call" })),
-				args: Type.Optional(Type.String({ description: "Arguments as a JSON object string" })),
-				connect: Type.Optional(Type.String({ description: "Server name to connect or reconnect" })),
-				describe: Type.Optional(Type.String({ description: "Tool name to describe" })),
-				search: Type.Optional(Type.String({ description: "Search query" })),
-				regex: Type.Optional(Type.Boolean({ description: "Treat search as regex" })),
-				includeSchemas: Type.Optional(Type.Boolean({ description: "Include schemas in search results" })),
-				server: Type.Optional(Type.String({ description: "Restrict to a specific server" })),
-				action: Type.Optional(Type.String({ description: "Action such as 'ui-messages'" })),
-			}),
-			async execute(
-				_toolCallId,
-				params: {
-					tool?: string;
-					args?: string;
-					connect?: string;
-					describe?: string;
-					search?: string;
-					regex?: boolean;
-					includeSchemas?: boolean;
-					server?: string;
-					action?: string;
-				},
-				_signal,
-				_onUpdate,
-				ctx,
-			) {
-				let parsedArgs: Record<string, unknown> | undefined;
-				if (params.args) {
-					try {
-						const parsed = JSON.parse(params.args);
-						if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-							const gotType = Array.isArray(parsed) ? "array" : parsed === null ? "null" : typeof parsed;
-							return {
-								content: [{ type: "text" as const, text: `Invalid args: expected a JSON object, got ${gotType}` }],
-								details: { error: "invalid_args_type" },
-							};
-						}
-						parsedArgs = parsed as Record<string, unknown>;
-					} catch (error) {
-						return {
-							content: [{ type: "text" as const, text: `Invalid args JSON: ${error instanceof Error ? error.message : String(error)}` }],
-							details: { error: "invalid_args" },
-						};
-					}
-				}
-
-				const mcp = await loadMcpModules();
-				const state = await ensureMcpReady(ctx);
-				if (!state) {
-					return {
-						content: [{ type: "text" as const, text: "MCP not initialized" }],
-						details: { error: "not_initialized" },
-					};
-				}
-
-				if (params.tool) {
-					const metadata = findRequestedMcpTool(state, params.tool, params.server);
-					if (!mutationGranted && requiresMcpMutationApproval(params as McpProxyRequest, metadata)) {
-						return {
-							content: [
-								{
-									type: "text" as const,
-									text: `MCP tool "${params.tool}" may mutate state. Call btw_request_write_access first.`,
-								},
-							],
-							details: { error: "mutation_access_required", tool: params.tool, server: params.server },
-						};
-					}
-				}
-
-				if (params.action === "ui-messages") {
-					return mcp.executeUiMessages(state);
-				}
-				if (params.tool) {
-					return mcp.executeCall(state, params.tool, parsedArgs, params.server);
-				}
-				if (params.connect) {
-					return mcp.executeConnect(state, params.connect);
-				}
-				if (params.describe) {
-					return mcp.executeDescribe(state, params.describe);
-				}
-				if (params.search) {
-					return mcp.executeSearch(state, params.search, params.regex, params.server, params.includeSchemas, () => pi.getAllTools());
-				}
-				if (params.server) {
-					return mcp.executeList(state, params.server);
-				}
-				return mcp.executeStatus(state);
-			},
 		});
 	};
 }
@@ -634,34 +325,6 @@ function createSideUiContext(
 	} as ExtensionContext["ui"];
 }
 
-function findRequestedMcpTool(
-	state: McpExtensionState,
-	toolName: string,
-	serverName?: string,
-): ToolMetadata | undefined {
-	if (serverName) {
-		return findToolByNameLocal(state.toolMetadata.get(serverName), toolName);
-	}
-	for (const metadata of state.toolMetadata.values()) {
-		const match = findToolByNameLocal(metadata, toolName);
-		if (match) {
-			return match;
-		}
-	}
-	return undefined;
-}
-
-function findToolByNameLocal(metadata: ToolMetadata[] | undefined, toolName: string): ToolMetadata | undefined {
-	if (!metadata) {
-		return undefined;
-	}
-	const exact = metadata.find((item) => item.name === toolName);
-	if (exact) {
-		return exact;
-	}
-	const normalized = toolName.replace(/-/g, "_");
-	return metadata.find((item) => item.name.replace(/-/g, "_") === normalized);
-}
 
 function formatModelLabel(model: Model<any> | undefined): string {
 	if (!model) {
