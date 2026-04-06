@@ -10,7 +10,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import { BtwOverlayBridge, type BtwDisplayEntry, type BtwOverlayView } from "./overlay.js";
+import { BtwOverlayBridge, type BtwDisplayEntry } from "./overlay.js";
 
 const SIDE_SYSTEM_PROMPT = `
 Authoritative /btw addendum:
@@ -62,7 +62,7 @@ export async function createSideSessionFile(cwd: string): Promise<string> {
 	return file;
 }
 
-export class BtwSideSessionRuntime implements BtwOverlayView {
+export class BtwSideSessionRuntime {
 	readonly bridge: BtwOverlayBridge;
 
 	private session?: SideSessionHandle;

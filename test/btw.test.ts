@@ -84,14 +84,60 @@ const theme = {
 	bold: (text: string) => text,
 } as any;
 
-const overlayView: BtwOverlayView = {
-	isReady: () => true,
-	isStreaming: () => false,
-	getModelLabel: () => "faux/test-model",
-	getModeLabel: () => "advisory only",
-	getDisplayEntries: () => [{ kind: "assistant", text: "hello from /btw" }],
-	sendMessage: async () => {},
+type TestOverlayViewState = {
+	ready: boolean;
+	streaming: boolean;
+	mainStatus: string;
+	mainModelLabel: string;
+	modelLabel: string;
+	modeLabel: string;
+	displayEntries: ReturnType<BtwOverlayView["getDisplayEntries"]>;
+	sentMessages: string[];
+	followUpEnabled: boolean;
+	steerEnabled: boolean;
 };
+
+function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "sentMessages">> = {}): {
+	state: TestOverlayViewState;
+	view: BtwOverlayView;
+} {
+	const state: TestOverlayViewState = {
+		ready: true,
+		streaming: false,
+		mainStatus: "idle",
+		mainModelLabel: "openai/gpt-5.2",
+		modelLabel: "faux/test-model",
+		modeLabel: "advisory only",
+		displayEntries: [{ kind: "assistant", text: "hello from /btw" }],
+		sentMessages: [],
+		followUpEnabled: false,
+		steerEnabled: false,
+		...overrides,
+	};
+
+	const view: BtwOverlayView = {
+		isReady: () => state.ready,
+		isStreaming: () => state.streaming,
+		getModelLabel: () => state.modelLabel,
+		getModeLabel: () => state.modeLabel,
+		getMainStatusLabel: () => state.mainStatus,
+		getMainModelLabel: () => state.mainModelLabel,
+		isFollowUpToMainEnabled: () => state.followUpEnabled,
+		isSteerToMainEnabled: () => state.steerEnabled,
+		toggleFollowUpToMain: () => {
+			state.followUpEnabled = !state.followUpEnabled;
+		},
+		toggleSteerToMain: () => {
+			state.steerEnabled = !state.steerEnabled;
+		},
+		getDisplayEntries: () => state.displayEntries,
+		sendMessage: async (text: string) => {
+			state.sentMessages.push(text);
+		},
+	};
+
+	return { state, view };
+}
 
 function flushTicks(): Promise<void> {
 	return new Promise((resolve) => process.nextTick(resolve));
@@ -112,9 +158,10 @@ async function testOverlayFocusAndEscRouting(): Promise<void> {
 	const tui = new TUI(terminal);
 	const base = new BaseComponent();
 	const bridge = new BtwOverlayBridge();
+	const { view } = createTestOverlayView();
 	let closed = false;
 
-	const overlay = attachOverlayBridge(new BtwOverlayComponent(tui, theme, bridge, overlayView, () => {
+	const overlay = attachOverlayBridge(new BtwOverlayComponent(tui, theme, bridge, view, () => {
 		closed = true;
 	}), bridge, tui);
 
@@ -140,10 +187,56 @@ async function testOverlayRenderDistinctness(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
 	const bridge = new BtwOverlayBridge();
-	const overlay = new BtwOverlayComponent(tui, theme, bridge, overlayView, () => {});
+	const { view } = createTestOverlayView();
+	const overlay = new BtwOverlayComponent(tui, theme, bridge, view, () => {});
 	const lines = overlay.render(80);
 	assert.ok(lines.some((line) => line.includes("\x1b[48;2;24;28;36m")), "overlay should render its own shaded background");
 	assert.ok(lines[0]?.includes("╭") && lines.at(-1)?.includes("╰"), "overlay should render a bordered floating window");
+}
+
+async function testOverlayForwardingToggleControls(): Promise<void> {
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
+	const bridge = new BtwOverlayBridge();
+	const { state, view } = createTestOverlayView({ mainStatus: "busy" });
+	const overlay = new BtwOverlayComponent(tui, theme, bridge, view, () => {});
+	overlay.focused = true;
+
+	let lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("Main: busy")), "overlay header should show the current main status");
+	assert.ok(lines.some((line) => line.includes("Main model: openai/gpt-5.2")), "overlay header should show the current main model label");
+	assert.ok(lines.some((line) => line.includes("FollowUp: off")), "overlay header should show the FollowUp toggle state");
+	assert.ok(lines.some((line) => line.includes("Steer: off")), "overlay header should show the Steer toggle state");
+	assert.equal(cursorMarkerPresent(lines), true, "message input should be focused by default");
+
+	overlay.handleInput("\t");
+	lines = overlay.render(80);
+	assert.equal(cursorMarkerPresent(lines), false, "tab should move focus from the message input to the first toggle");
+	assert.ok(lines.some((line) => line.includes("[FollowUp: off]")), "tab should focus the FollowUp toggle");
+
+	overlay.handleInput(" ");
+	assert.equal(state.followUpEnabled, true, "space should toggle the focused FollowUp control");
+	assert.deepEqual(state.sentMessages, [], "toggle controls should not send a chat message");
+	lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("[FollowUp: on]")), "overlay should render the updated FollowUp state");
+
+	overlay.handleInput("\t");
+	lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("[Steer: off]")), "tab should move focus to the Steer toggle");
+
+	overlay.handleInput("\r");
+	assert.equal(state.steerEnabled, true, "enter should toggle the focused Steer control");
+	lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("[Steer: on]")), "overlay should render the updated Steer state");
+
+	overlay.handleInput("\x1b[Z");
+	lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("[FollowUp: on]")), "shift+tab should move focus backward");
+
+	overlay.handleInput("\t");
+	overlay.handleInput("\t");
+	lines = overlay.render(80);
+	assert.equal(cursorMarkerPresent(lines), true, "tab should wrap focus back to the message input");
 }
 
 async function testSideSessionPersistence(): Promise<void> {
@@ -567,6 +660,7 @@ async function main(): Promise<void> {
 	await testSessionRef();
 	await testOverlayFocusAndEscRouting();
 	await testOverlayRenderDistinctness();
+	await testOverlayForwardingToggleControls();
 	await testSideSessionPersistence();
 	await testSideSessionUsesMainSystemPrompt();
 	await testBuildMainSessionContext();

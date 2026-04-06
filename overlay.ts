@@ -11,11 +11,20 @@ export interface BtwOverlayView {
 	isStreaming(): boolean;
 	getModelLabel(): string;
 	getModeLabel(): string;
+	getMainStatusLabel(): string;
+	getMainModelLabel(): string;
+	isFollowUpToMainEnabled(): boolean;
+	isSteerToMainEnabled(): boolean;
+	toggleFollowUpToMain(): void;
+	toggleSteerToMain(): void;
 	getDisplayEntries(): BtwDisplayEntry[];
 	sendMessage(text: string): Promise<void>;
 }
 
 type NotificationType = "info" | "warning" | "error";
+type OverlayFocusTarget = "input" | "followUp" | "steer";
+
+const OVERLAY_FOCUS_ORDER: readonly OverlayFocusTarget[] = ["input", "followUp", "steer"];
 
 interface NotificationItem {
 	message: string;
@@ -90,7 +99,7 @@ export class BtwOverlayComponent implements Component, Focusable {
 	focused = false;
 	private readonly input = new Input();
 	private readonly maxHeightProvider: () => number;
-	private draft = "";
+	private focusTarget: OverlayFocusTarget = "input";
 
 	constructor(
 		private readonly tui: TUI,
@@ -106,7 +115,6 @@ export class BtwOverlayComponent implements Component, Focusable {
 			if (!message) {
 				return;
 			}
-			this.draft = "";
 			this.input.setValue("");
 			void this.view.sendMessage(message);
 		};
@@ -120,23 +128,37 @@ export class BtwOverlayComponent implements Component, Focusable {
 			this.close();
 			return;
 		}
+		if (matchesKey(data, "tab")) {
+			this.cycleFocus(1);
+			return;
+		}
+		if (matchesKey(data, "shift+tab")) {
+			this.cycleFocus(-1);
+			return;
+		}
+		if (this.focusTarget !== "input" && (matchesKey(data, "space") || matchesKey(data, "enter"))) {
+			this.toggleFocusedControl();
+			return;
+		}
+		if (this.focusTarget !== "input") {
+			return;
+		}
 
 		this.input.handleInput(data);
-		this.draft = this.input.getValue();
 	}
 
 	render(width: number): string[] {
-		this.input.focused = this.focused;
+		this.input.focused = this.focused && this.focusTarget === "input";
 
 		const maxHeight = this.maxHeightProvider();
 		const innerWidth = Math.max(24, width - 4);
 		const snapshot = this.bridge.snapshot();
 		const notificationLines = this.notificationLines(snapshot.notifications, innerWidth);
-		const reservedLines = 9 + notificationLines.length;
+		const reservedLines = 10 + notificationLines.length;
 		const transcriptBudget = Math.max(4, maxHeight - reservedLines);
 		const transcriptLines = this.renderTranscript(innerWidth, transcriptBudget, snapshot);
 		const inputLine = this.renderInputLine(innerWidth);
-		const footer = truncateToWidth(`${this.theme.fg("dim", "enter send • esc close")}`, innerWidth);
+		const footer = truncateToWidth(`${this.theme.fg("dim", "tab cycle • enter send/toggle • space toggle • esc close")}`, innerWidth);
 
 		const body: string[] = [];
 		body.push(...this.renderHeader(innerWidth));
@@ -144,7 +166,7 @@ export class BtwOverlayComponent implements Component, Focusable {
 			body.push(...notificationLines);
 		}
 		body.push(...transcriptLines);
-		body.push(this.theme.fg("accent", "Message"));
+		body.push(this.theme.fg(this.focused && this.focusTarget === "input" ? "accent" : "muted", "Message"));
 		body.push(inputLine);
 		body.push(footer);
 
@@ -164,14 +186,14 @@ export class BtwOverlayComponent implements Component, Focusable {
 	}
 
 	private renderHeader(innerWidth: number): string[] {
-		const readyLabel = this.view.isReady()
-			? this.theme.fg("success", "● ready")
-			: this.theme.fg("warning", "● starting");
-		const mode = this.theme.fg("accent", this.view.getModeLabel());
-		const model = this.theme.fg("muted", this.view.getModelLabel());
+		const mainStatus = this.view.getMainStatusLabel();
+		const mainStatusColor = mainStatus === "busy" ? "warning" : "success";
+		const followUpToggle = this.renderToggle("FollowUp", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
+		const steerToggle = this.renderToggle("Steer", this.view.isSteerToMainEnabled(), this.focused && this.focusTarget === "steer");
 		return [
-			truncateToWidth(`${this.theme.bold(this.theme.fg("accent", "/btw"))}  ${readyLabel}  ${mode}`, innerWidth),
-			truncateToWidth(model, innerWidth),
+			truncateToWidth(`${this.theme.bold(this.theme.fg("accent", "/btw"))}  ${this.theme.fg("accent", "Main:")} ${this.theme.fg(mainStatusColor, mainStatus)}`, innerWidth),
+			truncateToWidth(this.theme.fg("muted", `Main model: ${this.view.getMainModelLabel()}`), innerWidth, "", true),
+			truncateToWidth(`${followUpToggle}  ${steerToggle}`, innerWidth, "", true),
 		];
 	}
 
@@ -224,6 +246,29 @@ export class BtwOverlayComponent implements Component, Focusable {
 			lines.push(...this.wrapBlock(this.theme.fg(color, item.message), innerWidth));
 		}
 		return lines;
+	}
+
+	private renderToggle(label: string, enabled: boolean, focused: boolean): string {
+		const text = `${label}: ${enabled ? "on" : "off"}`;
+		const rendered = this.theme.fg(enabled ? "success" : "muted", text);
+		return focused ? this.theme.bold(`[${rendered}]`) : rendered;
+	}
+
+	private cycleFocus(direction: 1 | -1): void {
+		const currentIndex = OVERLAY_FOCUS_ORDER.indexOf(this.focusTarget);
+		const nextIndex = (currentIndex + direction + OVERLAY_FOCUS_ORDER.length) % OVERLAY_FOCUS_ORDER.length;
+		this.focusTarget = OVERLAY_FOCUS_ORDER[nextIndex] ?? "input";
+	}
+
+	private toggleFocusedControl(): void {
+		switch (this.focusTarget) {
+			case "followUp":
+				this.view.toggleFollowUpToMain();
+				break;
+			case "steer":
+				this.view.toggleSteerToMain();
+				break;
+		}
 	}
 
 	private wrapWithPrefix(prefix: string, text: string, innerWidth: number): string[] {

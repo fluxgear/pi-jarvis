@@ -192,6 +192,16 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 		isStreaming: () => state.runtime?.isStreaming() ?? false,
 		getModelLabel: () => state.runtime?.getModelLabel() ?? formatModelLabel(state.model),
 		getModeLabel: () => state.runtime?.getModeLabel() ?? "advisory only",
+		getMainStatusLabel: () => state.mainContext.summary.mainStatus,
+		getMainModelLabel: () => state.mainContext.summary.mainModelLabel,
+		isFollowUpToMainEnabled: () => state.allowFollowUpToMain,
+		isSteerToMainEnabled: () => state.allowSteerToMain,
+		toggleFollowUpToMain: () => {
+			state.allowFollowUpToMain = !state.allowFollowUpToMain;
+		},
+		toggleSteerToMain: () => {
+			state.allowSteerToMain = !state.allowSteerToMain;
+		},
 		getDisplayEntries: () => getOverlayEntries(state),
 		sendMessage: async (text: string) => {
 			queueMessage(state, text);
