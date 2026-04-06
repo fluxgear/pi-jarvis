@@ -21,11 +21,13 @@ import { BtwOverlayBridge, type BtwDisplayEntry, type BtwOverlayView } from "./o
 import { type McpProxyRequest, requiresMcpMutationApproval } from "./mcp-policy.js";
 
 const SIDE_SYSTEM_PROMPT = `
-This is the /btw side conversation.
-Keep replies concise and focused on the side task.
-You are read-only by default.
-If you need to make file edits, run shell commands that may mutate state, or call MCP tools that may mutate state, first call btw_request_write_access with a concise reason and wait for the result before proceeding.
-Do not assume write access exists unless that tool returned approval in the current response.
+Authoritative /btw addendum:
+- You are running inside /btw.
+- The main Pi agent continues independently while you assist from the side.
+- You have no repo, system, or MCP tools in /btw.
+- Before each /btw turn you will be given a deterministic summary and bounded recent view of the main session.
+- Communication permissions to the main agent via followUp / steer are controlled separately and may be enabled or disabled.
+- Use the injected main-session context to answer what is happening right now.
 `.trim();
 
 const SAFE_TOOL_NAMES = ["read", "grep", "find", "ls", "mcp", "btw_request_write_access"] as const;
@@ -108,6 +110,10 @@ type SideRuntimeCreateOptions = {
 	thinkingLevel: string | undefined;
 	sessionFile: string;
 	systemPromptProvider: () => string;
+	mainContextProvider: () => {
+		summaryText: string;
+		recentText: string;
+	};
 	themeProvider: () => ExtensionContext["ui"]["theme"];
 };
 
@@ -242,8 +248,7 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 			cwd: options.cwd,
 			agentDir: getAgentDir(),
 			noExtensions: true,
-			extensionFactories: [createSideExtensionFactory(this.bridge, options.systemPromptProvider)],
-			appendSystemPrompt: SIDE_SYSTEM_PROMPT,
+			extensionFactories: [createSideExtensionFactory(this.bridge, options.systemPromptProvider, options.mainContextProvider)],
 		});
 		await resourceLoader.reload();
 
@@ -349,6 +354,7 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 function createSideExtensionFactory(
 	bridge: BtwOverlayBridge,
 	getMainSystemPrompt: SideRuntimeCreateOptions["systemPromptProvider"],
+	getMainContext: SideRuntimeCreateOptions["mainContextProvider"],
 ) {
 	return (pi: ExtensionAPI): void => {
 		let mcpState: McpExtensionState | null = null;
@@ -392,10 +398,16 @@ function createSideExtensionFactory(
 		};
 
 		pi.on("before_agent_start", async () => {
-			const systemPrompt = getMainSystemPrompt().trim();
-			if (systemPrompt.length === 0) {
-				return;
-			}
+			const mainContext = getMainContext();
+			const systemPrompt = [
+				getMainSystemPrompt().trim(),
+				SIDE_SYSTEM_PROMPT,
+				"Injected main-session context for this /btw turn:",
+				mainContext.summaryText.trim(),
+				mainContext.recentText.trim(),
+			]
+				.filter((section) => section.length > 0)
+				.join("\n\n");
 			return { systemPrompt };
 		});
 

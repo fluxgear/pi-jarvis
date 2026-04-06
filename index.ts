@@ -253,6 +253,7 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 			thinkingLevel: state.thinkingLevel,
 			sessionFile,
 			systemPromptProvider: () => state.systemPrompt,
+			mainContextProvider: () => state.mainContext,
 			themeProvider: state.themeProvider,
 		});
 

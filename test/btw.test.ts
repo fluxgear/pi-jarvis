@@ -213,6 +213,10 @@ async function testSideSessionPersistence(): Promise<void> {
 			thinkingLevel: undefined,
 			sessionFile,
 			systemPromptProvider: () => "main session prompt",
+			mainContextProvider: () => ({
+				summaryText: "Main session summary:\n- Main status: idle",
+				recentText: "Recent main session: none",
+			}),
 			themeProvider: () => theme,
 		});
 		const entries = runtime.getDisplayEntries().map((entry) => entry.text);
@@ -240,6 +244,41 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 
 	try {
 		const mainSystemPrompt = "Main session system prompt";
+		const createMainContext = (latestUserRequest: string, latestAssistantText: string, recentMessageText: string) => {
+			const branchEntries: SessionEntry[] = recentMessageText.length > 0
+				? [
+					{
+						type: "message",
+						id: "context-user-1",
+						parentId: null,
+						timestamp: "2026-01-01T00:00:00.000Z",
+						message: {
+							role: "user",
+							content: [{ type: "text", text: recentMessageText }],
+							timestamp: 0,
+						},
+					},
+				]
+				: [];
+
+			return buildMainSessionContext({
+				busyState: "busy",
+				hasPendingMessages: false,
+				modelLabel: "openai/gpt-5.2",
+				toolExecution: { active: false, running: [] },
+				latestUserRequest,
+				latestAssistantText,
+				systemPrompt: mainSystemPrompt,
+				contextUsage: {
+					tokens: 512,
+					contextWindow: 128000,
+					percent: 0.4,
+				},
+				branchEntries,
+			});
+		};
+
+		let currentMainContext = createMainContext("FIRST_MAIN_REQUEST", "first assistant status", "");
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
 		const bridge = new BtwOverlayBridge();
@@ -252,6 +291,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			thinkingLevel: undefined,
 			sessionFile,
 			systemPromptProvider: () => mainSystemPrompt,
+			mainContextProvider: () => currentMainContext,
 			themeProvider: () => theme,
 		});
 
@@ -272,8 +312,26 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		const extensionRunner = probe.session?.extensionRunner;
 		assert.ok(extensionRunner, "side session should expose an extension runner");
 
-		const result = await extensionRunner.emitBeforeAgentStart("check prompt", undefined, "fallback prompt");
-		assert.equal(result?.systemPrompt, mainSystemPrompt, "/btw should run with the main session system prompt");
+		const firstResult = await extensionRunner.emitBeforeAgentStart("check prompt", undefined, "fallback prompt");
+		const firstSystemPrompt = firstResult?.systemPrompt ?? "";
+		assert.ok(firstSystemPrompt.includes(mainSystemPrompt), "/btw should inherit the main session system prompt");
+		assert.ok(firstSystemPrompt.includes("You are running inside /btw."), "/btw addendum should identify the side assistant role");
+		assert.ok(firstSystemPrompt.includes("You have no repo, system, or MCP tools in /btw."), "/btw addendum should remove repo/system/MCP tool authority");
+		assert.ok(
+			firstSystemPrompt.includes("Communication permissions to the main agent via followUp / steer are controlled separately and may be enabled or disabled."),
+			"/btw addendum should describe separate followUp / steer permissions",
+		);
+		assert.ok(firstSystemPrompt.includes(currentMainContext.summaryText), "/btw prompt should inject the current main-session summary");
+		assert.ok(firstSystemPrompt.includes(currentMainContext.recentText), "/btw prompt should inject the current recent main-session window");
+
+		currentMainContext = createMainContext("SECOND_MAIN_REQUEST", "second assistant status", "SECOND_RECENT_WINDOW");
+		const secondResult = await extensionRunner.emitBeforeAgentStart("check prompt again", undefined, "fallback prompt");
+		const secondSystemPrompt = secondResult?.systemPrompt ?? "";
+		assert.ok(secondSystemPrompt.includes(currentMainContext.summaryText), "/btw prompt should refresh the injected main-session summary for each turn");
+		assert.ok(secondSystemPrompt.includes(currentMainContext.recentText), "/btw prompt should refresh the injected recent main-session window for each turn");
+		assert.ok(!secondSystemPrompt.includes("FIRST_MAIN_REQUEST"), "/btw should not keep stale startup context in later turns");
+		assert.ok(secondSystemPrompt.includes("SECOND_MAIN_REQUEST"), "/btw should inject the latest main-session request");
+		assert.ok(secondSystemPrompt.includes("SECOND_RECENT_WINDOW"), "/btw should inject the latest recent main-session text");
 
 		runtime.dispose();
 	} finally {
