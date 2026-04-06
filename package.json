@@ -1,0 +1,59 @@
+{
+  "name": "pi-btw",
+  "version": "0.1.0",
+  "description": "A /btw side-conversation overlay extension for Pi.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fluxgear/pi-btw.git"
+  },
+  "homepage": "https://github.com/fluxgear/pi-btw#readme",
+  "bugs": {
+    "url": "https://github.com/fluxgear/pi-btw/issues"
+  },
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "tui",
+    "overlay",
+    "assistant"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "prepack": "npm run build",
+    "test": "npm run check && node --import tsx test/btw.test.ts"
+  },
+  "dependencies": {
+    "pi-mcp-adapter": "^2.2.1"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-ai": "latest",
+    "@mariozechner/pi-coding-agent": "latest",
+    "@mariozechner/pi-tui": "latest",
+    "@sinclair/typebox": "^0.34.41",
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
