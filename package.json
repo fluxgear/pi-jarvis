@@ -1,6 +1,6 @@
 {
   "name": "pi-btw",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A /btw side-conversation overlay extension for Pi.",
   "type": "module",
   "main": "./dist/index.js",

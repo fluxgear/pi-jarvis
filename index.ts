@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { buildMainSessionContext, type MainSessionContextPayload } from "./main-context.js";
 import { MainSessionTracker } from "./main-session-state.js";
 import { attachOverlayBridge, BtwOverlayBridge, BtwOverlayComponent, type BtwDisplayEntry, type BtwOverlayView } from "./overlay.js";
 import { createBtwSessionRef, readBtwSessionRef, BTW_SESSION_REF_CUSTOM_TYPE, type BtwSessionRef } from "./session-ref.js";
@@ -9,6 +10,7 @@ import { BtwSideSessionRuntime, createSideSessionFile } from "./side-session.js"
 type MainState = {
 	bridge: BtwOverlayBridge;
 	mainSession: MainSessionTracker;
+	mainContext: MainSessionContextPayload;
 	sessionRef?: BtwSessionRef;
 	runtime?: BtwSideSessionRuntime;
 	bootPromise?: Promise<BtwSideSessionRuntime>;
@@ -20,9 +22,11 @@ type MainState = {
 	themeProvider: () => ExtensionContext["ui"]["theme"];
 };
 export default function btwExtension(pi: ExtensionAPI): void {
+	const mainSession = new MainSessionTracker();
 	const state: MainState = {
 		bridge: new BtwOverlayBridge(),
-		mainSession: new MainSessionTracker(),
+		mainSession,
+		mainContext: buildMainSessionContext(mainSession.snapshot()),
 		queuedMessages: [],
 		systemPrompt: "",
 		themeProvider: () => {
@@ -83,42 +87,50 @@ export default function btwExtension(pi: ExtensionAPI): void {
 	pi.on("agent_start", async (_event, ctx) => {
 		updateContextState(pi, state, ctx);
 		state.mainSession.handleAgentStart();
+		refreshMainContext(state);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		updateContextState(pi, state, ctx);
 		state.mainSession.handleAgentEnd();
+		refreshMainContext(state);
 	});
 
 	pi.on("message_start", async (event, ctx) => {
 		updateContextState(pi, state, ctx);
 		state.mainSession.handleMessageStart(event);
+		refreshMainContext(state);
 	});
 
 	pi.on("message_update", async (event, ctx) => {
 		updateContextState(pi, state, ctx);
 		state.mainSession.handleMessageUpdate(event);
+		refreshMainContext(state);
 	});
 
 	pi.on("message_end", async (event, ctx) => {
 		updateContextState(pi, state, ctx);
 		state.mainSession.handleMessageEnd(event);
+		refreshMainContext(state);
 	});
 
 	pi.on("tool_execution_start", async (event, ctx) => {
 		updateContextState(pi, state, ctx);
 		state.mainSession.handleToolExecutionStart(event);
+		refreshMainContext(state);
 	});
 
 	pi.on("tool_execution_end", async (event, ctx) => {
 		updateContextState(pi, state, ctx);
 		state.mainSession.handleToolExecutionEnd(event);
+		refreshMainContext(state);
 	});
 
 	pi.on("model_select", async (event, ctx) => {
 		updateContextState(pi, state, ctx);
 		state.model = event.model;
 		state.mainSession.handleModelSelect(formatModelLabel(event.model));
+		refreshMainContext(state);
 		if (!state.runtime) {
 			return;
 		}
@@ -136,6 +148,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
 		state.mainSession.reset(formatModelLabel(state.model));
+		refreshMainContext(state);
 		state.bridge.cancelPending();
 	});
 }
@@ -146,6 +159,11 @@ function updateContextState(pi: ExtensionAPI, state: MainState, ctx: ExtensionCo
 	state.systemPrompt = ctx.getSystemPrompt();
 	state.themeProvider = () => ctx.ui.theme;
 	state.mainSession.refreshFromContext(ctx, formatModelLabel(state.model));
+	refreshMainContext(state);
+}
+
+function refreshMainContext(state: MainState): void {
+	state.mainContext = buildMainSessionContext(state.mainSession.snapshot());
 }
 
 function normalizeInitialMessage(args: string): string | undefined {

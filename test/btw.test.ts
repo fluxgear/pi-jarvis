@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { AuthStorage, ModelRegistry, SessionManager } from "@mariozechner/pi-coding-agent";
+import { AuthStorage, ModelRegistry, SessionManager, type SessionEntry } from "@mariozechner/pi-coding-agent";
 import { TUI, type Component } from "@mariozechner/pi-tui";
 
 type Terminal = {
@@ -23,6 +23,7 @@ type Terminal = {
 };
 import { BtwOverlayBridge, BtwOverlayComponent, attachOverlayBridge, cursorMarkerPresent, type BtwOverlayView } from "../overlay.js";
 import { classifyMcpTool, requiresMcpMutationApproval } from "../mcp-policy.js";
+import { buildMainSessionContext, DEFAULT_MAIN_SESSION_RECENT_LIMIT } from "../main-context.js";
 import { createBtwSessionRef, readBtwSessionRef, BTW_SESSION_REF_CUSTOM_TYPE } from "../session-ref.js";
 import { BtwSideSessionRuntime, createSideSessionFile } from "../side-session.js";
 
@@ -285,6 +286,211 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 	}
 }
 
+async function testBuildMainSessionContext(): Promise<void> {
+	const usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+
+	const branchEntries: SessionEntry[] = [
+		{
+			type: "message",
+			id: "user-0",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "pre-compaction chatter" }],
+				timestamp: 0,
+			},
+		},
+		{
+			type: "compaction",
+			id: "compaction-1",
+			parentId: "user-0",
+			timestamp: "2026-01-01T00:00:01.000Z",
+			summary: "Older context",
+			firstKeptEntryId: "assistant-1",
+			tokensBefore: 512,
+		},
+		{
+			type: "message",
+			id: "assistant-1",
+			parentId: "compaction-1",
+			timestamp: "2026-01-01T00:00:02.000Z",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "Checking the post-compaction state." }],
+				api: "test-api",
+				provider: "test-provider",
+				model: "test-model",
+				usage,
+				stopReason: "stop",
+				timestamp: 1,
+			},
+		},
+		{
+			type: "message",
+			id: "user-2",
+			parentId: "assistant-1",
+			timestamp: "2026-01-01T00:00:03.000Z",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "Need the latest /btw context." }],
+				timestamp: 2,
+			},
+		},
+		{
+			type: "message",
+			id: "assistant-3",
+			parentId: "user-2",
+			timestamp: "2026-01-01T00:00:04.000Z",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Reviewing index.ts" },
+					{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "index.ts" } },
+				],
+				api: "test-api",
+				provider: "test-provider",
+				model: "test-model",
+				usage,
+				stopReason: "toolUse",
+				timestamp: 3,
+			},
+		},
+		{
+			type: "message",
+			id: "tool-result-4",
+			parentId: "assistant-3",
+			timestamp: "2026-01-01T00:00:05.000Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "index.ts contents" }],
+				isError: false,
+				timestamp: 4,
+			},
+		},
+		{
+			type: "custom_message",
+			id: "custom-hidden",
+			parentId: "tool-result-4",
+			timestamp: "2026-01-01T00:00:06.000Z",
+			customType: "btw.hidden",
+			content: "hidden internal status",
+			display: false,
+		},
+		{
+			type: "custom_message",
+			id: "custom-visible",
+			parentId: "custom-hidden",
+			timestamp: "2026-01-01T00:00:07.000Z",
+			customType: "btw.visible",
+			content: "Forward this summary later",
+			display: true,
+		},
+		{
+			type: "message",
+			id: "bash-5",
+			parentId: "custom-visible",
+			timestamp: "2026-01-01T00:00:08.000Z",
+			message: {
+				role: "bashExecution",
+				command: "npm run check",
+				output: "lint clean",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 5,
+			},
+		},
+		{
+			type: "message",
+			id: "user-6",
+			parentId: "bash-5",
+			timestamp: "2026-01-01T00:00:09.000Z",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "Investigate the /btw context window" }],
+				timestamp: 6,
+			},
+		},
+		{
+			type: "message",
+			id: "assistant-7",
+			parentId: "user-6",
+			timestamp: "2026-01-01T00:00:10.000Z",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "Summarizing the main session state." }],
+				api: "test-api",
+				provider: "test-provider",
+				model: "test-model",
+				usage,
+				stopReason: "stop",
+				timestamp: 7,
+			},
+		},
+		{
+			type: "branch_summary",
+			id: "branch-summary-8",
+			parentId: "assistant-7",
+			timestamp: "2026-01-01T00:00:11.000Z",
+			fromId: "user-2",
+			summary: "branched away to inspect an alternate fix",
+		},
+	];
+
+	const snapshot = {
+		busyState: "busy",
+		hasPendingMessages: true,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: {
+			active: true,
+			running: [
+				{ toolName: "read", args: { path: "index.ts" } },
+				{ toolName: "mcp", args: { search: "main context" } },
+			],
+		},
+		latestUserRequest: "Investigate the /btw context window",
+		latestAssistantText: "Summarizing the main session state.",
+		systemPrompt: "main system prompt",
+		contextUsage: {
+			tokens: 2048,
+			contextWindow: 128000,
+			percent: 1.6,
+		},
+		branchEntries,
+	} satisfies Parameters<typeof buildMainSessionContext>[0];
+
+	const context = buildMainSessionContext(snapshot);
+
+	assert.equal(context.summary.mainStatus, "busy");
+	assert.equal(context.summary.mainModelLabel, "openai/gpt-5.2");
+	assert.equal(context.summary.currentToolActivity.active, true);
+	assert.equal(context.summary.currentToolActivity.running.length, 2);
+	assert.equal(context.summary.latestUserRequest, "Investigate the /btw context window");
+	assert.equal(context.summary.latestAssistantText, "Summarizing the main session state.");
+	assert.equal(context.summary.pendingMessages, true);
+	assert.equal(context.summary.contextUsage?.tokens, 2048);
+	assert.equal(context.recentEntries.length, DEFAULT_MAIN_SESSION_RECENT_LIMIT);
+	assert.equal(context.recentEntries[0]?.text, "Reviewing index.ts");
+	assert.ok(context.summaryText.includes("Main session summary:"));
+	assert.ok(context.summaryText.includes("Current tool activity: read {\"path\":\"index.ts\"}, mcp search main context"));
+	assert.ok(context.summaryText.includes("Pending messages: yes"));
+	assert.ok(context.summaryText.includes("Context usage: 2048/128000 tokens (1.6%)"));
+	assert.ok(!context.recentText.includes("pre-compaction chatter"), "recent window should skip entries before the latest compaction boundary");
+	assert.ok(!context.recentText.includes("hidden internal status"), "recent window should skip hidden custom messages");
+	assert.ok(context.recentText.includes("Branch summary: branched away to inspect an alternate fix"));
+	assert.ok(context.recentText.includes("$ npm run check (ok) — lint clean"));
+}
+
 async function main(): Promise<void> {
 	await testSessionRef();
 	await testMcpPolicy();
@@ -292,6 +498,7 @@ async function main(): Promise<void> {
 	await testOverlayRenderDistinctness();
 	await testSideSessionPersistence();
 	await testSideSessionUsesMainSystemPrompt();
+	await testBuildMainSessionContext();
 	console.log("btw tests passed");
 }
 
