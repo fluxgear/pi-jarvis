@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AssistantMessage, Model } from "@mariozechner/pi-ai";
+import { Type } from "@mariozechner/pi-ai";
 import {
 	DefaultResourceLoader,
 	SessionManager,
@@ -35,6 +36,13 @@ type SideRuntimeCreateOptions = {
 		summaryText: string;
 		recentText: string;
 	};
+	communicationPermissionsProvider: () => {
+		allowFollowUpToMain: boolean;
+		allowSteerToMain: boolean;
+	};
+	sendFollowUpToMain: (message: string) => void;
+	confirmSteerToMain: (message: string) => Promise<boolean>;
+	sendSteerToMain: (message: string) => void;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
 };
 
@@ -159,60 +167,69 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 		this.bridge.detach();
 	}
 
-	private async initialize(options: SideRuntimeCreateOptions): Promise<void> {
-		const sideSessionManager = SessionManager.open(options.sessionFile, dirname(options.sessionFile));
-		const persistedContext = sideSessionManager.buildSessionContext();
-		const hadExistingEntries = sideSessionManager.getEntries().length > 0;
+private async initialize(options: SideRuntimeCreateOptions): Promise<void> {
+	const sideSessionManager = SessionManager.open(options.sessionFile, dirname(options.sessionFile));
+	const persistedContext = sideSessionManager.buildSessionContext();
+	const hadExistingEntries = sideSessionManager.getEntries().length > 0;
 
-		const resourceLoader = new DefaultResourceLoader({
-			cwd: options.cwd,
-			agentDir: getAgentDir(),
-			noExtensions: true,
-			extensionFactories: [createSideExtensionFactory(options.systemPromptProvider, options.mainContextProvider)],
-		});
-		await resourceLoader.reload();
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: options.cwd,
+		agentDir: getAgentDir(),
+		noExtensions: true,
+		extensionFactories: [
+			createSideExtensionFactory(
+				options.systemPromptProvider,
+				options.mainContextProvider,
+				options.communicationPermissionsProvider,
+				options.sendFollowUpToMain,
+				options.confirmSteerToMain,
+				options.sendSteerToMain,
+			),
+		],
+	});
+	await resourceLoader.reload();
 
-		const { session, modelFallbackMessage } = await createAgentSession({
-			cwd: options.cwd,
-			agentDir: getAgentDir(),
-			modelRegistry: options.modelRegistry as any,
-			model: options.model,
-			thinkingLevel: options.thinkingLevel as any,
-			tools: [],
-			resourceLoader,
-			sessionManager: sideSessionManager,
-		});
-		this.session = session;
+	const { session, modelFallbackMessage } = await createAgentSession({
+		cwd: options.cwd,
+		agentDir: getAgentDir(),
+		modelRegistry: options.modelRegistry as any,
+		model: options.model,
+		thinkingLevel: options.thinkingLevel as any,
+		tools: [],
+		resourceLoader,
+		sessionManager: sideSessionManager,
+	});
+	this.session = session;
 
-		await session.bindExtensions({
-			uiContext: createSideUiContext(this.bridge, options.themeProvider),
-			onError: (error) => {
-				this.bridge.notify(`Side extension error: ${error.error}`, "error");
-			},
-		});
+	await session.bindExtensions({
+		uiContext: createSideUiContext(this.bridge, options.themeProvider),
+		onError: (error) => {
+			this.bridge.notify(`Side extension error: ${error.error}`, "error");
+		},
+	});
 
-		if (options.model && hadExistingEntries) {
-			const previousModel = persistedContext.model;
-			if (!previousModel || previousModel.provider !== options.model.provider || previousModel.modelId !== options.model.id) {
-				await session.setModel(options.model);
-			}
+	if (options.model && hadExistingEntries) {
+		const previousModel = persistedContext.model;
+		if (!previousModel || previousModel.provider !== options.model.provider || previousModel.modelId !== options.model.id) {
+			await session.setModel(options.model);
 		}
-		if (options.thinkingLevel && persistedContext.thinkingLevel !== options.thinkingLevel) {
-			session.setThinkingLevel(options.thinkingLevel as any);
-		}
-
-		this.modelLabel = formatModelLabel(session.model);
-		this.ready = true;
-		this.bootError = modelFallbackMessage;
-		if (modelFallbackMessage) {
-			this.bridge.notify(modelFallbackMessage, "warning");
-		}
-
-		this.refreshHistory();
-		this.unsubscribe = session.subscribe((event: any) => {
-			this.handleEvent(event);
-		});
 	}
+	if (options.thinkingLevel && persistedContext.thinkingLevel !== options.thinkingLevel) {
+		session.setThinkingLevel(options.thinkingLevel as any);
+	}
+
+	this.modelLabel = formatModelLabel(session.model);
+	this.ready = true;
+	this.bootError = modelFallbackMessage;
+	if (modelFallbackMessage) {
+		this.bridge.notify(modelFallbackMessage, "warning");
+	}
+
+	this.refreshHistory();
+	this.unsubscribe = session.subscribe((event: any) => {
+		this.handleEvent(event);
+	});
+}
 
 	private handleEvent(event: any): void {
 		switch (event.type) {
@@ -266,13 +283,93 @@ export class BtwSideSessionRuntime implements BtwOverlayView {
 function createSideExtensionFactory(
 	getMainSystemPrompt: SideRuntimeCreateOptions["systemPromptProvider"],
 	getMainContext: SideRuntimeCreateOptions["mainContextProvider"],
+	getCommunicationPermissions: SideRuntimeCreateOptions["communicationPermissionsProvider"],
+	sendFollowUpToMain: SideRuntimeCreateOptions["sendFollowUpToMain"],
+	confirmSteerToMain: SideRuntimeCreateOptions["confirmSteerToMain"],
+	sendSteerToMain: SideRuntimeCreateOptions["sendSteerToMain"],
 ) {
+	const followUpToolName = "btw_send_follow_up_to_main";
+	const steerToolName = "btw_send_steer_to_main";
+	const toolParameters = Type.Object({
+		message: Type.String({
+			minLength: 1,
+			description: "Message to send to the main agent.",
+		}),
+	});
+	const createToolResult = (status: "sent" | "blocked" | "cancelled", text: string) => ({
+		content: [{ type: "text" as const, text }],
+		details: { status },
+	});
+	const getCommunicationPrompt = () => {
+		const permissions = getCommunicationPermissions();
+		return [
+			"Main-agent communication bridge for this /btw turn:",
+			permissions.allowFollowUpToMain
+				? "- `" + followUpToolName + "` sends a non-interrupting followUp message to the main agent. It is enabled right now."
+				: "- `" + followUpToolName + "` sends a non-interrupting followUp message to the main agent. It is disabled right now; attempts are blocked.",
+			permissions.allowSteerToMain
+				? "- `" + steerToolName + "` sends a steer message to the main agent. It is enabled right now, but every actual send still requires explicit user confirmation."
+				: "- `" + steerToolName + "` sends a steer message to the main agent. It is disabled right now; attempts are blocked. Even when enabled, every actual send still requires explicit user confirmation.",
+		].join("\n");
+	};
+
 	return (pi: ExtensionAPI): void => {
+		pi.registerTool({
+			name: followUpToolName,
+			label: "Send /btw followUp to main",
+			description: "Queue a followUp message for the main agent without interrupting the current turn. Use only when the user explicitly wants /btw to pass something back to the main agent.",
+			promptSnippet: followUpToolName + "(message) - queue a non-interrupting followUp message to the main agent when permission is enabled.",
+			promptGuidelines: [
+				"Use this only when the user explicitly wants /btw to pass a note back to the main agent.",
+				"This uses followUp delivery and should not interrupt the current turn.",
+			],
+			parameters: toolParameters,
+			async execute(_toolCallId, params) {
+				const message = params.message.trim();
+				if (!message) {
+					return createToolResult("blocked", "Cannot send an empty followUp message to the main agent.");
+				}
+				if (!getCommunicationPermissions().allowFollowUpToMain) {
+					return createToolResult("blocked", "Follow-up to the main agent is disabled for /btw.");
+				}
+				sendFollowUpToMain(message);
+				return createToolResult("sent", "Sent followUp to the main agent: " + message);
+			},
+		});
+
+		pi.registerTool({
+			name: steerToolName,
+			label: "Send /btw steer to main",
+			description: "Send a steer message to the main agent. This can interrupt or redirect the main turn, so use it only when the user explicitly wants that. Every actual send requires confirmation.",
+			promptSnippet: steerToolName + "(message) - send a confirmation-gated steer message to the main agent when permission is enabled.",
+			promptGuidelines: [
+				"Use this only when the user explicitly wants the main agent interrupted or redirected.",
+				"Every actual steer send requires explicit user confirmation.",
+			],
+			parameters: toolParameters,
+			async execute(_toolCallId, params) {
+				const message = params.message.trim();
+				if (!message) {
+					return createToolResult("blocked", "Cannot send an empty steer message to the main agent.");
+				}
+				if (!getCommunicationPermissions().allowSteerToMain) {
+					return createToolResult("blocked", "Steer to the main agent is disabled for /btw.");
+				}
+				const confirmed = await confirmSteerToMain(message);
+				if (!confirmed) {
+					return createToolResult("cancelled", "Cancelled steer to the main agent.");
+				}
+				sendSteerToMain(message);
+				return createToolResult("sent", "Sent steer to the main agent: " + message);
+			},
+		});
+
 		pi.on("before_agent_start", async () => {
 			const mainContext = getMainContext();
 			const systemPrompt = [
 				getMainSystemPrompt().trim(),
 				SIDE_SYSTEM_PROMPT,
+				getCommunicationPrompt(),
 				"Injected main-session context for this /btw turn:",
 				mainContext.summaryText.trim(),
 				mainContext.recentText.trim(),

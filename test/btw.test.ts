@@ -196,6 +196,13 @@ async function testSideSessionPersistence(): Promise<void> {
 				summaryText: "Main session summary:\n- Main status: idle",
 				recentText: "Recent main session: none",
 			}),
+			communicationPermissionsProvider: () => ({
+				allowFollowUpToMain: false,
+				allowSteerToMain: false,
+			}),
+			sendFollowUpToMain: () => {},
+			confirmSteerToMain: async () => false,
+			sendSteerToMain: () => {},
 			themeProvider: () => theme,
 		});
 		const entries = runtime.getDisplayEntries().map((entry) => entry.text);
@@ -258,6 +265,10 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		};
 
 		let currentMainContext = createMainContext("FIRST_MAIN_REQUEST", "first assistant status", "");
+		let communicationPermissions = {
+			allowFollowUpToMain: false,
+			allowSteerToMain: false,
+		};
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
 		const bridge = new BtwOverlayBridge();
@@ -271,6 +282,10 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			sessionFile,
 			systemPromptProvider: () => mainSystemPrompt,
 			mainContextProvider: () => currentMainContext,
+			communicationPermissionsProvider: () => communicationPermissions,
+			sendFollowUpToMain: () => {},
+			confirmSteerToMain: async () => false,
+			sendSteerToMain: () => {},
 			themeProvider: () => theme,
 		});
 		assert.equal(runtime.getModeLabel(), "advisory only", "/btw should stay in advisory-only mode");
@@ -301,11 +316,21 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			firstSystemPrompt.includes("Communication permissions to the main agent via followUp / steer are controlled separately and may be enabled or disabled."),
 			"/btw addendum should describe separate followUp / steer permissions",
 		);
+		assert.ok(firstSystemPrompt.includes("btw_send_follow_up_to_main"), "/btw prompt should name the followUp bridge tool");
+		assert.ok(firstSystemPrompt.includes("btw_send_steer_to_main"), "/btw prompt should name the steer bridge tool");
+		assert.ok(
+			firstSystemPrompt.includes("It is disabled right now; attempts are blocked."),
+			"/btw prompt should describe disabled bridge permissions",
+		);
 		assert.ok(!firstSystemPrompt.includes("btw_request_write_access"), "/btw prompt should not reference the removed mutation approval tool");
 		assert.ok(firstSystemPrompt.includes(currentMainContext.summaryText), "/btw prompt should inject the current main-session summary");
 		assert.ok(firstSystemPrompt.includes(currentMainContext.recentText), "/btw prompt should inject the current recent main-session window");
 
 		currentMainContext = createMainContext("SECOND_MAIN_REQUEST", "second assistant status", "SECOND_RECENT_WINDOW");
+		communicationPermissions = {
+			allowFollowUpToMain: true,
+			allowSteerToMain: true,
+		};
 		const secondResult = await extensionRunner.emitBeforeAgentStart("check prompt again", undefined, "fallback prompt");
 		const secondSystemPrompt = secondResult?.systemPrompt ?? "";
 		assert.ok(secondSystemPrompt.includes(currentMainContext.summaryText), "/btw prompt should refresh the injected main-session summary for each turn");
@@ -313,6 +338,14 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		assert.ok(!secondSystemPrompt.includes("FIRST_MAIN_REQUEST"), "/btw should not keep stale startup context in later turns");
 		assert.ok(secondSystemPrompt.includes("SECOND_MAIN_REQUEST"), "/btw should inject the latest main-session request");
 		assert.ok(secondSystemPrompt.includes("SECOND_RECENT_WINDOW"), "/btw should inject the latest recent main-session text");
+		assert.ok(
+			secondSystemPrompt.includes("It is enabled right now."),
+			"/btw prompt should reflect enabled followUp forwarding",
+		);
+		assert.ok(
+			secondSystemPrompt.includes("It is enabled right now, but every actual send still requires explicit user confirmation."),
+			"/btw prompt should reflect enabled steer forwarding with confirmation gating",
+		);
 
 		runtime.dispose();
 	} finally {

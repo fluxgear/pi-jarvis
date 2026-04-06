@@ -20,6 +20,9 @@ type MainState = {
 	thinkingLevel?: string;
 	systemPrompt: string;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
+	uiProvider: () => ExtensionContext["ui"];
+	allowFollowUpToMain: boolean;
+	allowSteerToMain: boolean;
 };
 export default function btwExtension(pi: ExtensionAPI): void {
 	const mainSession = new MainSessionTracker();
@@ -32,6 +35,11 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		themeProvider: () => {
 			throw new Error("/btw theme requested before UI was available.");
 		},
+		uiProvider: () => {
+			throw new Error("/btw UI requested before it was available.");
+		},
+		allowFollowUpToMain: false,
+		allowSteerToMain: false,
 	};
 
 	pi.registerCommand("btw", {
@@ -78,6 +86,8 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.bootPromise = undefined;
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
+		state.allowFollowUpToMain = false;
+		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(ctx.model));
 		updateContextState(pi, state, ctx);
 		state.sessionRef = readBtwSessionRef(ctx.sessionManager.getBranch());
@@ -147,6 +157,8 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.bootPromise = undefined;
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
+		state.allowFollowUpToMain = false;
+		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(state.model));
 		refreshMainContext(state);
 	});
@@ -156,6 +168,7 @@ function updateContextState(pi: ExtensionAPI, state: MainState, ctx: ExtensionCo
 	state.thinkingLevel = pi.getThinkingLevel();
 	state.systemPrompt = ctx.getSystemPrompt();
 	state.themeProvider = () => ctx.ui.theme;
+	state.uiProvider = () => ctx.ui;
 	state.mainSession.refreshFromContext(ctx, formatModelLabel(state.model));
 	refreshMainContext(state);
 }
@@ -252,6 +265,18 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 			sessionFile,
 			systemPromptProvider: () => state.systemPrompt,
 			mainContextProvider: () => state.mainContext,
+			communicationPermissionsProvider: () => ({
+				allowFollowUpToMain: state.allowFollowUpToMain,
+				allowSteerToMain: state.allowSteerToMain,
+			}),
+			sendFollowUpToMain: (message: string) => {
+				pi.sendUserMessage(message, { deliverAs: "followUp" });
+			},
+			confirmSteerToMain: async (message: string) =>
+				state.uiProvider().confirm("Send /btw steer to main?", `This will steer the main agent with:\n\n${message}`),
+			sendSteerToMain: (message: string) => {
+				pi.sendUserMessage(message, { deliverAs: "steer" });
+			},
 			themeProvider: state.themeProvider,
 		});
 
