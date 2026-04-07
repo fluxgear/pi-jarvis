@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AuthStorage, ModelRegistry, SessionManager, type SessionEntry } from "@mariozechner/pi-coding-agent";
@@ -776,6 +776,85 @@ async function testHandleMessageStartMarksAssistantStreaming(): Promise<void> {
 		},
 	});
 	assert.equal(tracker.snapshot().latestAssistantText, "FINAL_ASSISTANT_TEXT", "message_end should record the final assistant text");
+}
+
+async function testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText(): Promise<void> {
+	const tracker = new MainSessionTracker();
+	tracker.refreshFromContext({
+		getSystemPrompt: () => "main prompt",
+		getContextUsage: () => undefined,
+		isIdle: () => false,
+		hasPendingMessages: () => false,
+		sessionManager: {
+			getBranch: () => [
+				{
+					type: "message",
+					id: "assistant-with-text",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00.000Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "OLDER_TEXT" }],
+						api: "test-api",
+						provider: "test-provider",
+						model: "test-model",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: 0,
+					},
+				},
+				{
+					type: "message",
+					id: "assistant-tool-only",
+					parentId: "assistant-with-text",
+					timestamp: "2026-01-01T00:00:01.000Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "index.ts" } }],
+						api: "test-api",
+						provider: "test-provider",
+						model: "test-model",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 1,
+					},
+				},
+			],
+		},
+	} as any, "openai/gpt-5.2");
+
+	const snapshot = tracker.snapshot();
+	const context = buildMainSessionContext(snapshot);
+	assert.equal(snapshot.latestAssistantText, undefined, "the latest assistant summary field must clear when the latest assistant turn is tool-only");
+	assert.equal(context.summary.latestAssistantText, undefined, "the /btw main-session summary must not reuse older assistant text for a tool-only latest turn");
+	assert.ok(context.summaryText.includes("Latest assistant text: none"), "the formatted main-session summary should report no assistant text for a tool-only latest turn");
+	assert.ok(context.recentText.includes('read {"path":"index.ts"}'), "the recent main-session window should still include the current tool activity");
+}
+
+async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
+	type PackageManifest = {
+		peerDependencies?: Record<string, string>;
+	};
+
+	const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as PackageManifest;
+	const peerDependencies = packageJson.peerDependencies ?? {};
+	assert.equal(peerDependencies["@mariozechner/pi-ai"], "*", "package.json must declare @mariozechner/pi-ai as a peer dependency for published Pi packages");
+	assert.equal(peerDependencies["@mariozechner/pi-coding-agent"], "*", "package.json must declare @mariozechner/pi-coding-agent as a peer dependency for published Pi packages");
+	assert.equal(peerDependencies["@mariozechner/pi-tui"], "*", "package.json must declare @mariozechner/pi-tui as a peer dependency for published Pi packages");
 }
 
 type BridgeToolDefinition = {
@@ -1650,6 +1729,7 @@ async function main(): Promise<void> {
 	await testBridgeConfirmationPrimitive();
 	await testOverlayConfirmationRenderingAndKeys();
 	await testHandleMessageStartMarksAssistantStreaming();
+	await testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText();
 	await testMainSessionTrackerToolExecutionKeying();
 	await testBtwModelDefaultFollowMainBehavior();
 	await testBtwModelOverrideAndStateSeparation();
@@ -1662,6 +1742,7 @@ async function main(): Promise<void> {
 	await testSteerToolPermissionAndConfirmGating();
 	await testSteerConfirmationRoutedThroughBridge();
 	await testBuildMainSessionContext();
+	await testPackageManifestDeclaresPiPeerDependencies();
 	console.log("btw tests passed");
 }
 

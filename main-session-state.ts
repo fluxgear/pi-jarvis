@@ -179,10 +179,7 @@ export class MainSessionTracker {
 		}
 
 		if (message.role === "user") {
-			const text = extractTextContent(message.content);
-			if (text) {
-				this.latestUserRequest = text;
-			}
+			this.latestUserRequest = extractTextContent(message.content) || undefined;
 			return;
 		}
 
@@ -193,15 +190,14 @@ export class MainSessionTracker {
 		if (typeof assistantStreaming === "boolean") {
 			this.assistantStreaming = assistantStreaming;
 		}
-		const text = extractAssistantText(message.content);
-		if (text) {
-			this.latestAssistantText = text;
-		}
+		this.latestAssistantText = extractAssistantText(message.content) || undefined;
 	}
 
 	private refreshMessagesFromBranch(): void {
 		let latestUserRequest: string | undefined;
 		let latestAssistantText: string | undefined;
+		let sawLatestUserMessage = false;
+		let sawLatestAssistantMessage = false;
 
 		for (let i = this.branchEntries.length - 1; i >= 0; i--) {
 			const message = unwrapMessage(this.branchEntries[i]);
@@ -209,21 +205,17 @@ export class MainSessionTracker {
 				continue;
 			}
 
-			if (!latestUserRequest && message.role === "user") {
-				const text = extractTextContent(message.content);
-				if (text) {
-					latestUserRequest = text;
-				}
+			if (!sawLatestUserMessage && message.role === "user") {
+				latestUserRequest = extractTextContent(message.content) || undefined;
+				sawLatestUserMessage = true;
 			}
 
-			if (!latestAssistantText && message.role === "assistant") {
-				const text = extractAssistantText(message.content);
-				if (text) {
-					latestAssistantText = text;
-				}
+			if (!sawLatestAssistantMessage && message.role === "assistant") {
+				latestAssistantText = extractAssistantText(message.content) || undefined;
+				sawLatestAssistantMessage = true;
 			}
 
-			if (latestUserRequest && latestAssistantText) {
+			if (sawLatestUserMessage && sawLatestAssistantMessage) {
 				break;
 			}
 		}

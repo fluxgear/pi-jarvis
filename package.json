@@ -1,6 +1,6 @@
 {
   "name": "pi-btw",
-  "version": "0.95.0",
+  "version": "1.0.0",
   "description": "A /btw side-conversation overlay extension for Pi.",
   "type": "module",
   "main": "./dist/index.js",
@@ -46,6 +46,11 @@
   },
   "dependencies": {
     "pi-mcp-adapter": "^2.2.1"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "latest",
