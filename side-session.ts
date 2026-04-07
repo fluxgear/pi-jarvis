@@ -7,6 +7,7 @@ import {
 	SessionManager,
 	createAgentSession,
 	getAgentDir,
+	type AgentSessionEvent,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
@@ -222,12 +223,12 @@ private async initialize(options: SideRuntimeCreateOptions): Promise<void> {
 	}
 
 	this.refreshHistory();
-	this.unsubscribe = session.subscribe((event: any) => {
+	this.unsubscribe = session.subscribe((event) => {
 		this.handleEvent(event);
 	});
 }
 
-	private handleEvent(event: any): void {
+	private handleEvent(event: AgentSessionEvent): void {
 		switch (event.type) {
 			case "agent_start":
 				this.bridge.setWorkingMessage("Thinking…");
@@ -238,29 +239,29 @@ private async initialize(options: SideRuntimeCreateOptions): Promise<void> {
 				this.pendingToolCalls.clear();
 				break;
 			case "message_update":
-				if (event.message?.role === "assistant") {
+				if (event.message.role === "assistant") {
 					this.streamingAssistant = event.message;
 				}
 				break;
 			case "message_end":
-				if (event.message?.role === "assistant") {
+				if (event.message.role === "assistant") {
 					this.streamingAssistant = undefined;
 				}
-				this.refreshHistory();
 				break;
 			case "message_start":
-				if (event.message?.role === "user" || event.message?.role === "toolResult" || event.message?.role === "custom") {
-					this.refreshHistory();
-				}
+				// The unconditional refreshHistory() at the bottom of this switch
+				// already picks up any newly persisted message, so no case-specific
+				// handling is needed here.
 				break;
 			case "tool_execution_start":
-				this.pendingToolCalls.set(event.toolCallId, formatToolCall(event.toolName, event.args));
+				if (typeof event.toolCallId === "string" && event.toolCallId.length > 0) {
+					this.pendingToolCalls.set(event.toolCallId, formatToolCall(event.toolName, event.args));
+				}
 				break;
 			case "tool_execution_end":
-				this.pendingToolCalls.delete(event.toolCallId);
-				break;
-			case "model_select":
-				this.modelLabel = formatModelLabel(event.model);
+				if (typeof event.toolCallId === "string" && event.toolCallId.length > 0) {
+					this.pendingToolCalls.delete(event.toolCallId);
+				}
 				break;
 		}
 		this.refreshHistory();

@@ -23,6 +23,7 @@ type Terminal = {
 };
 import { BtwOverlayBridge, BtwOverlayComponent, attachOverlayBridge, cursorMarkerPresent, type BtwOverlayView } from "../overlay.js";
 import { buildMainSessionContext, DEFAULT_MAIN_SESSION_RECENT_LIMIT } from "../main-context.js";
+import { MainSessionTracker } from "../main-session-state.js";
 import { createBtwSessionRef, readBtwSessionRef, BTW_SESSION_REF_CUSTOM_TYPE } from "../session-ref.js";
 import { BtwSideSessionRuntime, createSideSessionFile } from "../side-session.js";
 
@@ -652,13 +653,658 @@ async function testBuildMainSessionContext(): Promise<void> {
 	assert.ok(context.recentText.includes("$ npm run check (ok) — lint clean"));
 }
 
+async function testOverlayInputSwallowedOnToggleFocus(): Promise<void> {
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
+	const bridge = new BtwOverlayBridge();
+	const { state, view } = createTestOverlayView();
+	const overlay = new BtwOverlayComponent(tui, theme, bridge, view, () => {});
+	overlay.focused = true;
+
+	overlay.handleInput("\t");
+	let lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("[FollowUp: off]")), "tab should focus the FollowUp toggle");
+
+	overlay.handleInput("a");
+	overlay.handleInput("b");
+	overlay.handleInput("c");
+	assert.equal(state.followUpEnabled, false, "text keys should not toggle the focused control");
+	assert.deepEqual(state.sentMessages, [], "text keys must not be queued as messages while a toggle has focus");
+
+	overlay.handleInput("\t");
+	overlay.handleInput("\t");
+	lines = overlay.render(80);
+	assert.equal(cursorMarkerPresent(lines), true, "focus should wrap back to the message input");
+
+	overlay.handleInput("\r");
+	assert.deepEqual(state.sentMessages, [], "empty input should not submit a message after returning to the input field");
+}
+
+async function testHandleMessageStartMarksAssistantStreaming(): Promise<void> {
+	const tracker = new MainSessionTracker();
+	tracker.refreshFromContext({
+		getSystemPrompt: () => "main prompt",
+		getContextUsage: () => undefined,
+		isIdle: () => false,
+		hasPendingMessages: () => false,
+		sessionManager: {
+			getBranch: () => [
+				{
+					type: "message",
+					id: "prior-assistant",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00.000Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "PRIOR_PERSISTED_TEXT" }],
+						api: "test-api",
+						provider: "test-provider",
+						model: "test-model",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: 0,
+					},
+				},
+			],
+		},
+	} as any, "openai/gpt-5.2");
+	assert.equal(tracker.snapshot().latestAssistantText, "PRIOR_PERSISTED_TEXT");
+
+	tracker.handleMessageStart({
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "IN_FLIGHT_TEXT" }],
+		},
+	});
+	assert.equal(tracker.snapshot().latestAssistantText, "IN_FLIGHT_TEXT", "message_start should capture the in-flight assistant text");
+
+	tracker.refreshFromContext({
+		getSystemPrompt: () => "main prompt",
+		getContextUsage: () => undefined,
+		isIdle: () => false,
+		hasPendingMessages: () => false,
+		sessionManager: {
+			getBranch: () => [
+				{
+					type: "message",
+					id: "prior-assistant",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00.000Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "PRIOR_PERSISTED_TEXT" }],
+						api: "test-api",
+						provider: "test-provider",
+						model: "test-model",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: 0,
+					},
+				},
+			],
+		},
+	} as any, "openai/gpt-5.2");
+	assert.equal(
+		tracker.snapshot().latestAssistantText,
+		"IN_FLIGHT_TEXT",
+		"refreshFromContext during streaming must not overwrite the in-flight assistant text with the persisted prior message",
+	);
+
+	tracker.handleMessageEnd({
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "FINAL_ASSISTANT_TEXT" }],
+		},
+	});
+	assert.equal(tracker.snapshot().latestAssistantText, "FINAL_ASSISTANT_TEXT", "message_end should record the final assistant text");
+}
+
+type BridgeToolDefinition = {
+	execute: (
+		toolCallId: string,
+		params: { message: string },
+		signal: AbortSignal | undefined,
+		onUpdate: undefined,
+		ctx: undefined,
+	) => Promise<{ content: Array<{ text: string }>; details: { status: string } }>;
+};
+
+type SideRuntimeToolProbe = {
+	session?: {
+		getAllTools(): Array<{ name: string }>;
+		getActiveToolNames(): string[];
+		getToolDefinition(name: string): BridgeToolDefinition | undefined;
+	};
+};
+
+async function withSideSessionRuntime(
+	overrides: {
+		communicationPermissions?: { allowFollowUpToMain: boolean; allowSteerToMain: boolean };
+		sendFollowUpToMain?: (message: string) => void;
+		confirmSteerToMain?: (message: string) => Promise<boolean>;
+		sendSteerToMain?: (message: string) => void;
+	},
+	run: (runtime: BtwSideSessionRuntime, probe: SideRuntimeToolProbe) => Promise<void>,
+): Promise<void> {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		const bridge = new BtwOverlayBridge();
+		const sessionFile = await createSideSessionFile(cwd);
+		let permissions = overrides.communicationPermissions ?? { allowFollowUpToMain: false, allowSteerToMain: false };
+		const runtime = await BtwSideSessionRuntime.create({
+			bridge,
+			cwd,
+			modelRegistry: modelRegistry as any,
+			model: undefined,
+			thinkingLevel: undefined,
+			sessionFile,
+			systemPromptProvider: () => "main session prompt",
+			mainContextProvider: () => ({
+				summaryText: "Main session summary:\n- Main status: idle",
+				recentText: "Recent main session: none",
+			}),
+			communicationPermissionsProvider: () => permissions,
+			sendFollowUpToMain: overrides.sendFollowUpToMain ?? (() => {}),
+			confirmSteerToMain: overrides.confirmSteerToMain ?? (async () => false),
+			sendSteerToMain: overrides.sendSteerToMain ?? (() => {}),
+			themeProvider: () => theme,
+		});
+		try {
+			const probe = runtime as unknown as SideRuntimeToolProbe;
+			await run(runtime, probe);
+		} finally {
+			runtime.dispose();
+		}
+		// Re-run helper users may swap permissions via this object reference
+		void permissions;
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testSideSessionToolWhitelist(): Promise<void> {
+	await withSideSessionRuntime({}, async (_runtime, probe) => {
+		assert.ok(probe.session, "side session runtime should expose the underlying session");
+		const activeToolNames = probe.session!.getActiveToolNames().slice().sort();
+		assert.deepEqual(
+			activeToolNames,
+			["btw_send_follow_up_to_main", "btw_send_steer_to_main"],
+			"/btw side session must expose only the followUp and steer bridge tools to the LLM (no repo, system, or MCP tools)",
+		);
+		for (const forbidden of ["read", "write", "edit", "bash", "grep", "find", "ls"]) {
+			assert.ok(
+				!activeToolNames.includes(forbidden),
+				`/btw side session must not expose the built-in ${forbidden} tool to the LLM`,
+			);
+		}
+	});
+}
+
+async function testFollowUpToolPermissionGating(): Promise<void> {
+	let permissionsState = { allowFollowUpToMain: false, allowSteerToMain: false };
+	let sentFollowUp: string | undefined;
+
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		const bridge = new BtwOverlayBridge();
+		const sessionFile = await createSideSessionFile(cwd);
+		const runtime = await BtwSideSessionRuntime.create({
+			bridge,
+			cwd,
+			modelRegistry: modelRegistry as any,
+			model: undefined,
+			thinkingLevel: undefined,
+			sessionFile,
+			systemPromptProvider: () => "main session prompt",
+			mainContextProvider: () => ({
+				summaryText: "Main session summary:\n- Main status: idle",
+				recentText: "Recent main session: none",
+			}),
+			communicationPermissionsProvider: () => permissionsState,
+			sendFollowUpToMain: (message) => {
+				sentFollowUp = message;
+			},
+			confirmSteerToMain: async () => false,
+			sendSteerToMain: () => {},
+			themeProvider: () => theme,
+		});
+
+		try {
+			const probe = runtime as unknown as SideRuntimeToolProbe;
+			assert.ok(probe.session, "side session runtime should expose the underlying session");
+			const followUp = probe.session!.getToolDefinition("btw_send_follow_up_to_main");
+			assert.ok(followUp, "followUp bridge tool should be registered on the side session");
+
+			const blockedByPermission = await followUp!.execute("call-1", { message: "please poke main" }, undefined, undefined, undefined);
+			assert.equal(blockedByPermission.details.status, "blocked", "followUp must be blocked when permission is OFF");
+			assert.equal(sentFollowUp, undefined, "followUp callback must not fire while permission is OFF");
+
+			const blockedByEmpty = await followUp!.execute("call-2", { message: "   " }, undefined, undefined, undefined);
+			assert.equal(blockedByEmpty.details.status, "blocked", "followUp must reject empty/whitespace messages");
+			assert.equal(sentFollowUp, undefined, "followUp callback must not fire on empty message");
+
+			permissionsState = { allowFollowUpToMain: true, allowSteerToMain: false };
+			const sent = await followUp!.execute("call-3", { message: "  hello main  " }, undefined, undefined, undefined);
+			assert.equal(sent.details.status, "sent", "followUp must be delivered when permission is ON");
+			assert.equal(sentFollowUp, "hello main", "followUp callback must be invoked with the trimmed message");
+		} finally {
+			runtime.dispose();
+		}
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testSteerToolPermissionAndConfirmGating(): Promise<void> {
+	let permissionsState = { allowFollowUpToMain: false, allowSteerToMain: false };
+	let confirmCalls = 0;
+	let confirmAnswer = false;
+	let sentSteer: string | undefined;
+
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		const bridge = new BtwOverlayBridge();
+		const sessionFile = await createSideSessionFile(cwd);
+		const runtime = await BtwSideSessionRuntime.create({
+			bridge,
+			cwd,
+			modelRegistry: modelRegistry as any,
+			model: undefined,
+			thinkingLevel: undefined,
+			sessionFile,
+			systemPromptProvider: () => "main session prompt",
+			mainContextProvider: () => ({
+				summaryText: "Main session summary:\n- Main status: idle",
+				recentText: "Recent main session: none",
+			}),
+			communicationPermissionsProvider: () => permissionsState,
+			sendFollowUpToMain: () => {},
+			confirmSteerToMain: async () => {
+				confirmCalls += 1;
+				return confirmAnswer;
+			},
+			sendSteerToMain: (message) => {
+				sentSteer = message;
+			},
+			themeProvider: () => theme,
+		});
+
+		try {
+			const probe = runtime as unknown as SideRuntimeToolProbe;
+			assert.ok(probe.session, "side session runtime should expose the underlying session");
+			const steer = probe.session!.getToolDefinition("btw_send_steer_to_main");
+			assert.ok(steer, "steer bridge tool should be registered on the side session");
+
+			const blockedByPermission = await steer!.execute("call-1", { message: "steer main" }, undefined, undefined, undefined);
+			assert.equal(blockedByPermission.details.status, "blocked", "steer must be blocked when permission is OFF");
+			assert.equal(confirmCalls, 0, "steer must not request confirmation while permission is OFF");
+			assert.equal(sentSteer, undefined, "steer callback must not fire while permission is OFF");
+
+			permissionsState = { allowFollowUpToMain: false, allowSteerToMain: true };
+
+			const blockedByEmpty = await steer!.execute("call-2", { message: "   " }, undefined, undefined, undefined);
+			assert.equal(blockedByEmpty.details.status, "blocked", "steer must reject empty/whitespace messages");
+			assert.equal(confirmCalls, 0, "steer must not request confirmation on an empty message");
+
+			confirmAnswer = false;
+			const cancelled = await steer!.execute("call-3", { message: "refocus on tests" }, undefined, undefined, undefined);
+			assert.equal(cancelled.details.status, "cancelled", "steer must be cancelled when confirmation is denied");
+			assert.equal(confirmCalls, 1, "steer must request confirmation when permission is ON");
+			assert.equal(sentSteer, undefined, "steer callback must not fire when confirmation is denied");
+
+			confirmAnswer = true;
+			const sent = await steer!.execute("call-4", { message: "  refocus on tests  " }, undefined, undefined, undefined);
+			assert.equal(sent.details.status, "sent", "steer must be delivered when confirmation is granted");
+			assert.equal(confirmCalls, 2, "steer must request confirmation for every send attempt");
+			assert.equal(sentSteer, "refocus on tests", "steer callback must be invoked with the trimmed message");
+		} finally {
+			runtime.dispose();
+		}
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testBridgeConfirmationPrimitive(): Promise<void> {
+	const bridge = new BtwOverlayBridge();
+	assert.equal(bridge.hasPendingConfirmation(), false);
+	assert.equal(bridge.getPendingConfirmation(), undefined);
+
+	// Unattached request still stores the pending confirmation (overlay may be
+	// closed while the side session is still processing a turn).
+	const detachedPromise = bridge.requestConfirmation("title", "message");
+	assert.equal(bridge.hasPendingConfirmation(), true);
+	assert.deepEqual(bridge.getPendingConfirmation(), { title: "title", message: "message" });
+	bridge.resolveConfirmation(true);
+	assert.equal(await detachedPromise, true);
+	assert.equal(bridge.hasPendingConfirmation(), false);
+
+	// attach should trigger a render when a confirmation is requested.
+	let renderCount = 0;
+	bridge.attach(() => {
+		renderCount += 1;
+	});
+	renderCount = 0;
+	const falsePromise = bridge.requestConfirmation("t", "m");
+	assert.ok(renderCount > 0, "requestConfirmation must request a render when attached");
+	renderCount = 0;
+	bridge.resolveConfirmation(false);
+	assert.equal(await falsePromise, false);
+	assert.ok(renderCount > 0, "resolveConfirmation must request a render when attached");
+
+	// Detaching the bridge must not cancel a pending confirmation; the user can
+	// re-open /btw and answer it later.
+	const survivesDetach = bridge.requestConfirmation("t2", "m2");
+	bridge.detach();
+	assert.equal(bridge.hasPendingConfirmation(), true, "detach must not cancel pending confirmation");
+	bridge.attach(() => {});
+	bridge.resolveConfirmation(true);
+	assert.equal(await survivesDetach, true);
+
+	// reset() cancels any pending confirmation to avoid hanging the side
+	// session during session_start / session_shutdown.
+	const resetPromise = bridge.requestConfirmation("t3", "m3");
+	bridge.reset();
+	assert.equal(await resetPromise, false);
+	assert.equal(bridge.hasPendingConfirmation(), false);
+
+	// A newer confirmation supersedes an older one.
+	const older = bridge.requestConfirmation("older", "o");
+	const newer = bridge.requestConfirmation("newer", "n");
+	assert.equal(await older, false, "older confirmation must resolve false when superseded");
+	assert.deepEqual(bridge.getPendingConfirmation(), { title: "newer", message: "n" });
+	bridge.resolveConfirmation(true);
+	assert.equal(await newer, true);
+
+	// Resolving with no pending confirmation is a no-op.
+	bridge.resolveConfirmation(true);
+	bridge.resolveConfirmation(false);
+	assert.equal(bridge.hasPendingConfirmation(), false);
+}
+
+async function testOverlayConfirmationRenderingAndKeys(): Promise<void> {
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
+	const bridge = new BtwOverlayBridge();
+	const { state, view } = createTestOverlayView();
+	let closed = false;
+	const overlay = new BtwOverlayComponent(tui, theme, bridge, view, () => {
+		closed = true;
+	});
+	overlay.focused = true;
+	bridge.attach(() => tui.requestRender());
+
+	let lines = overlay.render(80);
+	assert.equal(cursorMarkerPresent(lines), true, "input cursor should be visible before any confirmation");
+
+	const confirmPromise = bridge.requestConfirmation(
+		"Send /btw steer to main?",
+		"This will steer the main agent with:\n\nfocus on edge cases",
+	);
+	lines = overlay.render(80);
+	assert.ok(
+		lines.some((line) => line.includes("Send /btw steer to main?")),
+		"overlay should render the confirmation title inside the floating overlay",
+	);
+	assert.ok(
+		lines.some((line) => line.includes("focus on edge cases")),
+		"overlay should render the confirmation message body",
+	);
+	assert.ok(
+		lines.some((line) => line.includes("Press Y to confirm, N or Esc to cancel.")),
+		"overlay should display the confirmation hint",
+	);
+	assert.ok(
+		lines.some((line) => line.includes("Y confirm")),
+		"footer should advertise the confirmation hotkeys",
+	);
+	assert.equal(cursorMarkerPresent(lines), false, "input cursor must be hidden while a confirmation is pending");
+
+	// Text keys are swallowed and must not flip toggles or enqueue input.
+	overlay.handleInput("a");
+	overlay.handleInput("b");
+	overlay.handleInput("\t");
+	overlay.handleInput("\x1b[Z");
+	overlay.handleInput("\r");
+	assert.equal(bridge.hasPendingConfirmation(), true, "non-confirmation keys must be swallowed");
+	assert.equal(state.followUpEnabled, false, "Tab must not cycle focus while a confirmation is pending");
+	assert.equal(state.steerEnabled, false, "Enter must not toggle anything while a confirmation is pending");
+	assert.deepEqual(state.sentMessages, [], "no messages may be submitted while a confirmation is pending");
+
+	// Esc during confirmation cancels only the confirmation, not the overlay.
+	overlay.handleInput("\x1b");
+	assert.equal(await confirmPromise, false, "Esc must cancel the confirmation");
+	assert.equal(closed, false, "Esc during confirmation must not close the overlay");
+	assert.equal(bridge.hasPendingConfirmation(), false);
+
+	// After resolution, the input is restored and Esc closes the overlay again.
+	lines = overlay.render(80);
+	assert.equal(cursorMarkerPresent(lines), true, "input cursor must return after the confirmation resolves");
+
+	// 'Y' accepts, lowercase 'n' cancels, lowercase 'y' accepts.
+	for (const [key, expected] of [
+		["Y", true],
+		["y", true],
+		["N", false],
+		["n", false],
+	] as const) {
+		const promise = bridge.requestConfirmation("title", "body");
+		overlay.handleInput(key);
+		assert.equal(await promise, expected, `key '${key}' should resolve the confirmation to ${expected}`);
+	}
+
+	// Finally, make sure Esc still closes the overlay after the confirmation
+	// is gone.
+	overlay.handleInput("\x1b");
+	assert.equal(closed, true, "Esc must close the overlay once no confirmation is pending");
+}
+
+async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		const bridge = new BtwOverlayBridge();
+		bridge.attach(() => {});
+		const sessionFile = await createSideSessionFile(cwd);
+		const permissionsState = { allowFollowUpToMain: false, allowSteerToMain: true };
+		let sentSteer: string | undefined;
+		const runtime = await BtwSideSessionRuntime.create({
+			bridge,
+			cwd,
+			modelRegistry: modelRegistry as any,
+			model: undefined,
+			thinkingLevel: undefined,
+			sessionFile,
+			systemPromptProvider: () => "main session prompt",
+			mainContextProvider: () => ({
+				summaryText: "Main session summary:\n- Main status: idle",
+				recentText: "Recent main session: none",
+			}),
+			communicationPermissionsProvider: () => permissionsState,
+			sendFollowUpToMain: () => {},
+			confirmSteerToMain: (message: string) =>
+				bridge.requestConfirmation(
+					"Send /btw steer to main?",
+					`This will steer the main agent with:\n\n${message}`,
+				),
+			sendSteerToMain: (message) => {
+				sentSteer = message;
+			},
+			themeProvider: () => theme,
+		});
+
+		try {
+			const probe = runtime as unknown as SideRuntimeToolProbe;
+			assert.ok(probe.session, "side session runtime should expose the underlying session");
+			const steer = probe.session!.getToolDefinition("btw_send_steer_to_main");
+			assert.ok(steer, "steer bridge tool should be registered on the side session");
+
+			// ACCEPT path: execute blocks on bridge confirmation, user answers Yes.
+			const execAccept = steer!.execute("call-1", { message: "focus on errors" }, undefined, undefined, undefined);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(bridge.hasPendingConfirmation(), true, "steer execute must request bridge confirmation");
+			assert.deepEqual(
+				bridge.getPendingConfirmation(),
+				{
+					title: "Send /btw steer to main?",
+					message: "This will steer the main agent with:\n\nfocus on errors",
+				},
+				"bridge confirmation must carry the steer title and message body",
+			);
+			bridge.resolveConfirmation(true);
+			const acceptResult = await execAccept;
+			assert.equal(acceptResult.details.status, "sent");
+			assert.equal(sentSteer, "focus on errors");
+
+			// CANCEL path: user answers No.
+			sentSteer = undefined;
+			const execCancel = steer!.execute("call-2", { message: "stop" }, undefined, undefined, undefined);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(bridge.hasPendingConfirmation(), true);
+			bridge.resolveConfirmation(false);
+			const cancelResult = await execCancel;
+			assert.equal(cancelResult.details.status, "cancelled");
+			assert.equal(sentSteer, undefined);
+
+			// RESET path: bridge.reset() during a pending confirmation must
+			// unblock the tool as cancelled so session_shutdown cannot hang.
+			const execReset = steer!.execute("call-3", { message: "teardown" }, undefined, undefined, undefined);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(bridge.hasPendingConfirmation(), true);
+			bridge.reset();
+			const resetResult = await execReset;
+			assert.equal(resetResult.details.status, "cancelled", "bridge.reset() must unblock the pending steer as cancelled");
+			assert.equal(sentSteer, undefined);
+		} finally {
+			runtime.dispose();
+		}
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testMainSessionTrackerToolExecutionKeying(): Promise<void> {
+	const tracker = new MainSessionTracker();
+
+	// Matching toolCallIds: start+end by id should clean up correctly.
+	tracker.handleToolExecutionStart({ toolCallId: "call-read-1", toolName: "read", args: { path: "a.ts" } });
+	tracker.handleToolExecutionStart({ toolCallId: "call-bash-1", toolName: "bash", args: { command: "ls" } });
+	assert.equal(tracker.snapshot().toolExecution.running.length, 2);
+	tracker.handleToolExecutionEnd({ toolCallId: "call-read-1", toolName: "read" });
+	tracker.handleToolExecutionEnd({ toolCallId: "call-bash-1", toolName: "bash" });
+	assert.equal(tracker.snapshot().toolExecution.active, false);
+	assert.equal(tracker.snapshot().toolExecution.running.length, 0);
+
+	// Start without a toolCallId must still be cleared by an end event that
+	// has only a toolName. Previously the synthetic `tool:${toolName}` key set
+	// by handleToolExecutionStart could be missed by handleToolExecutionEnd if
+	// the end carried a toolCallId instead of a toolName.
+	tracker.handleToolExecutionStart({ toolName: "grep", args: { pattern: "foo" } });
+	assert.equal(tracker.snapshot().toolExecution.running.length, 1);
+	tracker.handleToolExecutionEnd({ toolName: "grep" });
+	assert.equal(
+		tracker.snapshot().toolExecution.running.length,
+		0,
+		"tool execution end by toolName must clear a synthetic `tool:${toolName}` entry",
+	);
+
+	// End by toolCallId should still clean up a start that had no toolCallId
+	// if the toolName matches.
+	tracker.handleToolExecutionStart({ toolName: "find", args: { path: "." } });
+	assert.equal(tracker.snapshot().toolExecution.running.length, 1);
+	tracker.handleToolExecutionEnd({ toolCallId: "late-call-id", toolName: "find" });
+	assert.equal(
+		tracker.snapshot().toolExecution.running.length,
+		0,
+		"tool execution end must fall back to the synthetic key when the toolCallId does not match any stored entry",
+	);
+}
+
 async function main(): Promise<void> {
 	await testSessionRef();
 	await testOverlayFocusAndEscRouting();
 	await testOverlayRenderDistinctness();
 	await testOverlayForwardingToggleControls();
+	await testOverlayInputSwallowedOnToggleFocus();
+	await testBridgeConfirmationPrimitive();
+	await testOverlayConfirmationRenderingAndKeys();
+	await testHandleMessageStartMarksAssistantStreaming();
+	await testMainSessionTrackerToolExecutionKeying();
 	await testSideSessionPersistence();
 	await testSideSessionUsesMainSystemPrompt();
+	await testSideSessionToolWhitelist();
+	await testFollowUpToolPermissionGating();
+	await testSteerToolPermissionAndConfirmGating();
+	await testSteerConfirmationRoutedThroughBridge();
 	await testBuildMainSessionContext();
 	console.log("btw tests passed");
 }

@@ -31,10 +31,20 @@ interface NotificationItem {
 	timestamp: number;
 }
 
+export interface BtwPendingConfirmation {
+	title: string;
+	message: string;
+}
+
+interface PendingConfirmationRecord extends BtwPendingConfirmation {
+	resolve: (value: boolean) => void;
+}
+
 export interface BtwOverlaySnapshot {
 	statuses: string[];
 	notifications: NotificationItem[];
 	workingMessage?: string;
+	pendingConfirmation?: BtwPendingConfirmation;
 }
 
 export class BtwOverlayBridge {
@@ -42,12 +52,16 @@ export class BtwOverlayBridge {
 	private statuses = new Map<string, string>();
 	private notifications: NotificationItem[] = [];
 	private workingMessage?: string;
+	private pendingConfirmation?: PendingConfirmationRecord;
 
 	reset(): void {
 		this.statuses.clear();
 		this.notifications = [];
 		this.workingMessage = undefined;
+		const pending = this.pendingConfirmation;
+		this.pendingConfirmation = undefined;
 		this.emit();
+		pending?.resolve(false);
 	}
 
 	attach(requestRender: () => void): void {
@@ -81,11 +95,53 @@ export class BtwOverlayBridge {
 		this.emit();
 	}
 
+	/**
+	 * Request a confirmation from the user. The returned promise resolves to
+	 * `true` if the user confirms, `false` if they cancel, if `reset()` is
+	 * called, or if a newer confirmation supersedes this one. Callers must not
+	 * rely on the confirmation being answered immediately — the overlay may be
+	 * closed when this is invoked, in which case the pending confirmation is
+	 * held until the overlay is re-opened and the user answers it.
+	 */
+	requestConfirmation(title: string, message: string): Promise<boolean> {
+		if (this.pendingConfirmation) {
+			const previous = this.pendingConfirmation;
+			this.pendingConfirmation = undefined;
+			previous.resolve(false);
+		}
+		return new Promise<boolean>((resolve) => {
+			this.pendingConfirmation = { title, message, resolve };
+			this.emit();
+		});
+	}
+
+	resolveConfirmation(value: boolean): void {
+		const pending = this.pendingConfirmation;
+		if (!pending) {
+			return;
+		}
+		this.pendingConfirmation = undefined;
+		this.emit();
+		pending.resolve(value);
+	}
+
+	hasPendingConfirmation(): boolean {
+		return this.pendingConfirmation !== undefined;
+	}
+
+	getPendingConfirmation(): BtwPendingConfirmation | undefined {
+		if (!this.pendingConfirmation) {
+			return undefined;
+		}
+		return { title: this.pendingConfirmation.title, message: this.pendingConfirmation.message };
+	}
+
 	snapshot(): BtwOverlaySnapshot {
 		return {
 			statuses: Array.from(this.statuses.values()),
 			notifications: [...this.notifications],
 			workingMessage: this.workingMessage,
+			pendingConfirmation: this.getPendingConfirmation(),
 		};
 	}
 
@@ -123,6 +179,20 @@ export class BtwOverlayComponent implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		if (this.bridge.hasPendingConfirmation()) {
+			if (data === "y" || data === "Y") {
+				this.bridge.resolveConfirmation(true);
+				return;
+			}
+			if (data === "n" || data === "N" || matchesKey(data, "escape")) {
+				this.bridge.resolveConfirmation(false);
+				return;
+			}
+			// Swallow every other key while a confirmation is pending so the user
+			// cannot accidentally submit a message, move focus, or close the overlay
+			// without answering the prompt.
+			return;
+		}
 		if (matchesKey(data, "escape")) {
 			this.close();
 			return;
@@ -147,34 +217,70 @@ export class BtwOverlayComponent implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
-		this.input.focused = this.focused && this.focusTarget === "input";
+		const hasConfirmation = this.bridge.hasPendingConfirmation();
+		this.input.focused = this.focused && !hasConfirmation && this.focusTarget === "input";
 
 		const maxHeight = this.maxHeightProvider();
 		const innerWidth = Math.max(24, width - 4);
 		const snapshot = this.bridge.snapshot();
 		const notificationLines = this.notificationLines(snapshot.notifications, innerWidth);
-		const reservedLines = 10 + notificationLines.length;
+		const headerLines = this.renderHeader(innerWidth);
+		const confirmationLines = snapshot.pendingConfirmation
+			? this.renderConfirmation(snapshot.pendingConfirmation, innerWidth)
+			: undefined;
+		const inputLine = confirmationLines ? undefined : this.renderInputLine(innerWidth);
+		const footer = truncateToWidth(
+			`${this.theme.fg("dim", hasConfirmation ? "Y confirm • N/esc cancel" : "tab cycle • enter send/toggle • space toggle • esc close")}`,
+			innerWidth,
+		);
+
+		// Pre-compute every fixed section first so the transcript budget reflects
+		// the true remaining space. Under-reserving here would push the footer
+		// (or the confirmation banner) off the bottom of the overlay.
+		const promptSectionLines = confirmationLines ? confirmationLines.length : 2;
+		const footerSectionLines = 1;
+		const borderLines = 2;
+		const reservedLines =
+			headerLines.length + notificationLines.length + promptSectionLines + footerSectionLines + borderLines;
 		const transcriptBudget = Math.max(4, maxHeight - reservedLines);
 		const transcriptLines = this.renderTranscript(innerWidth, transcriptBudget, snapshot);
-		const inputLine = this.renderInputLine(innerWidth);
-		const footer = truncateToWidth(`${this.theme.fg("dim", "tab cycle • enter send/toggle • space toggle • esc close")}`, innerWidth);
 
 		const body: string[] = [];
-		body.push(...this.renderHeader(innerWidth));
+		body.push(...headerLines);
 		if (notificationLines.length > 0) {
 			body.push(...notificationLines);
 		}
 		body.push(...transcriptLines);
-		body.push(this.theme.fg(this.focused && this.focusTarget === "input" ? "accent" : "muted", "Message"));
-		body.push(inputLine);
+		if (confirmationLines) {
+			body.push(...confirmationLines);
+		} else {
+			body.push(this.theme.fg(this.focused && this.focusTarget === "input" ? "accent" : "muted", "Message"));
+			if (inputLine) {
+				body.push(inputLine);
+			}
+		}
 		body.push(footer);
 
 		const lines: string[] = [];
 		lines.push(this.borderTop(innerWidth));
-		for (const line of body.slice(0, Math.max(1, maxHeight - 2))) {
+		for (const line of body.slice(0, Math.max(1, maxHeight - borderLines))) {
 			lines.push(this.row(line, innerWidth));
 		}
 		lines.push(this.borderBottom(innerWidth));
+		return lines;
+	}
+
+	private renderConfirmation(confirmation: BtwPendingConfirmation, innerWidth: number): string[] {
+		const lines: string[] = [];
+		lines.push(this.theme.bold(this.theme.fg("warning", `▶ ${confirmation.title}`)));
+		for (const rawLine of confirmation.message.split("\n")) {
+			if (rawLine.length === 0) {
+				lines.push("");
+				continue;
+			}
+			lines.push(...this.wrapBlock(rawLine, innerWidth));
+		}
+		lines.push(this.theme.fg("muted", "Press Y to confirm, N or Esc to cancel."));
 		return lines;
 	}
 

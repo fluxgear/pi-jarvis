@@ -20,7 +20,6 @@ type MainState = {
 	thinkingLevel?: string;
 	systemPrompt: string;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
-	uiProvider: () => ExtensionContext["ui"];
 	allowFollowUpToMain: boolean;
 	allowSteerToMain: boolean;
 };
@@ -34,9 +33,6 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		systemPrompt: "",
 		themeProvider: () => {
 			throw new Error("/btw theme requested before UI was available.");
-		},
-		uiProvider: () => {
-			throw new Error("/btw UI requested before it was available.");
 		},
 		allowFollowUpToMain: false,
 		allowSteerToMain: false,
@@ -161,6 +157,10 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(state.model));
 		refreshMainContext(state);
+		// Cancel any pending confirmation and clear transient overlay state so a
+		// side-session tool execute still waiting on confirmSteerToMain does not
+		// hang while the session is torn down.
+		state.bridge.reset();
 	});
 }
 function updateContextState(pi: ExtensionAPI, state: MainState, ctx: ExtensionContext): void {
@@ -168,7 +168,6 @@ function updateContextState(pi: ExtensionAPI, state: MainState, ctx: ExtensionCo
 	state.thinkingLevel = pi.getThinkingLevel();
 	state.systemPrompt = ctx.getSystemPrompt();
 	state.themeProvider = () => ctx.ui.theme;
-	state.uiProvider = () => ctx.ui;
 	state.mainSession.refreshFromContext(ctx, formatModelLabel(state.model));
 	refreshMainContext(state);
 }
@@ -228,18 +227,27 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 		return state.flushPromise;
 	}
 
+	// flushQueuedMessages is awaited in fire-and-forget paths (the /btw command
+	// handler's initial message flush and the overlay input submit). Any error
+	// that propagates out of here becomes an unhandled promise rejection, so the
+	// IIFE must catch and surface every failure via bridge.notify rather than
+	// rethrowing.
 	state.flushPromise = (async () => {
-		const runtime = await ensureRuntime(pi, state, ctx);
-		await runtime.syncModel(state.model, state.thinkingLevel);
+		try {
+			const runtime = await ensureRuntime(pi, state, ctx);
+			await runtime.syncModel(state.model, state.thinkingLevel);
 
-		while (state.queuedMessages.length > 0) {
-			const message = state.queuedMessages.shift()!;
-			try {
-				await runtime.sendMessage(message);
-			} catch (error) {
-				state.bridge.notify(`Failed to send /btw message: ${error instanceof Error ? error.message : String(error)}`, "error");
-				break;
+			while (state.queuedMessages.length > 0) {
+				const message = state.queuedMessages.shift()!;
+				try {
+					await runtime.sendMessage(message);
+				} catch (error) {
+					state.bridge.notify(`Failed to send /btw message: ${error instanceof Error ? error.message : String(error)}`, "error");
+					break;
+				}
 			}
+		} catch (error) {
+			state.bridge.notify(`/btw startup failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
 	})().finally(() => {
 		state.flushPromise = undefined;
@@ -281,8 +289,16 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 			sendFollowUpToMain: (message: string) => {
 				pi.sendUserMessage(message, { deliverAs: "followUp" });
 			},
-			confirmSteerToMain: async (message: string) =>
-				state.uiProvider().confirm("Send /btw steer to main?", `This will steer the main agent with:\n\n${message}`),
+			// Route the confirmation through the /btw overlay itself via the
+			// bridge. The main session's UI confirm would otherwise render inside
+			// the base layer (the pi editor container) and sit hidden behind the
+			// /btw overlay, leaving the side-session tool execute hung on a
+			// promise the user could never answer.
+			confirmSteerToMain: (message: string) =>
+				state.bridge.requestConfirmation(
+					"Send /btw steer to main?",
+					`This will steer the main agent with:\n\n${message}`,
+				),
 			sendSteerToMain: (message: string) => {
 				pi.sendUserMessage(message, { deliverAs: "steer" });
 			},

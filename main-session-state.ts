@@ -96,7 +96,11 @@ export class MainSessionTracker {
 	}
 
 	handleMessageStart(event: MessageEventLike): void {
-		this.captureMessage(event.message);
+		// Mark assistant streaming on message_start so a refreshFromContext
+		// triggered by another event in the gap before message_update cannot
+		// overwrite the in-flight latestAssistantText with the persisted prior
+		// assistant message.
+		this.captureMessage(event.message, true);
 	}
 
 	handleMessageUpdate(event: MessageEventLike): void {
@@ -125,16 +129,20 @@ export class MainSessionTracker {
 
 	handleToolExecutionEnd(event: ToolExecutionEndEventLike): void {
 		const toolCallId = typeof event.toolCallId === "string" && event.toolCallId.length > 0 ? event.toolCallId : undefined;
-		if (toolCallId) {
-			this.activeToolCalls.delete(toolCallId);
+		const toolName = typeof event.toolName === "string" && event.toolName.length > 0 ? event.toolName : undefined;
+		if (toolCallId && this.activeToolCalls.delete(toolCallId)) {
 			return;
 		}
-
-		const toolName = typeof event.toolName === "string" && event.toolName.length > 0 ? event.toolName : undefined;
 		if (!toolName) {
 			return;
 		}
-
+		// Fallback: handleToolExecutionStart may have keyed the entry by a
+		// synthetic `tool:${toolName}` when the start event carried no
+		// toolCallId. Drop any matching entry so the currentToolActivity summary
+		// does not leak a stale "currently running" tool.
+		if (this.activeToolCalls.delete(`tool:${toolName}`)) {
+			return;
+		}
 		for (const [key, value] of this.activeToolCalls.entries()) {
 			if (value.toolName === toolName) {
 				this.activeToolCalls.delete(key);
@@ -182,10 +190,10 @@ export class MainSessionTracker {
 			return;
 		}
 
-		const text = extractAssistantText(message.content);
 		if (typeof assistantStreaming === "boolean") {
 			this.assistantStreaming = assistantStreaming;
 		}
+		const text = extractAssistantText(message.content);
 		if (text) {
 			this.latestAssistantText = text;
 		}
@@ -237,7 +245,9 @@ function unwrapMessage(value: unknown): MessageLike | undefined {
 		return undefined;
 	}
 
-	return readMessageLike(value.data);
+	// SessionEntry of type "message" wraps the actual AgentMessage under .message;
+	// extension event payloads sometimes wrap it under .data instead.
+	return readMessageLike(value.message) ?? readMessageLike(value.data);
 }
 
 function readMessageLike(value: unknown): MessageLike | undefined {
