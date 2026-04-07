@@ -1208,6 +1208,31 @@ async function testBtwModelDefaultFollowMainBehavior(): Promise<void> {
 	});
 }
 
+async function testBtwModelOpensModelMenuWhenNoArgs(): Promise<void> {
+	await withBtwExtensionHarness(async (harness) => {
+		(harness.ctx.ui as any).custom = async () => harness.pinnedModel;
+		await harness.api.runCommand("btw-model", "", harness.ctx);
+
+		const runtime = await openBtwRuntime(harness);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.pinnedModel.id,
+			"the /btw model selected from the menu should be used when the side runtime starts later",
+		);
+		assert.ok(
+			harness.ctx.notifications.some((notification) =>
+				notification.message.includes(`Pinned /btw to ${harness.pinnedModel.provider}/${harness.pinnedModel.id}`),
+			),
+			"/btw-model menu selection should report the pinned /btw model",
+		);
+		assert.equal(
+			harness.ctx.model?.id,
+			harness.mainModel.id,
+			"/btw-model menu selection must not mutate the main session model state",
+		);
+	});
+}
+
 async function testBtwModelOverrideAndStateSeparation(): Promise<void> {
 	await withBtwExtensionHarness(async (harness) => {
 		await harness.api.runCommand("btw-model", "side-beta", harness.ctx);
@@ -1732,6 +1757,7 @@ async function main(): Promise<void> {
 	await testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText();
 	await testMainSessionTrackerToolExecutionKeying();
 	await testBtwModelDefaultFollowMainBehavior();
+	await testBtwModelOpensModelMenuWhenNoArgs();
 	await testBtwModelOverrideAndStateSeparation();
 	await testPinnedBtwModelNotClobberedByMainModelSelect();
 	await testBtwModelReturnToFollowMainBehavior();

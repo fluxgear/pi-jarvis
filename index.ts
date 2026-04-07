@@ -1,6 +1,12 @@
 import { existsSync } from "node:fs";
 import type { Model } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import {
+	ModelSelectorComponent,
+	SettingsManager,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import { buildMainSessionContext, type MainSessionContextPayload } from "./main-context.js";
 import { MainSessionTracker } from "./main-session-state.js";
 import { attachOverlayBridge, BtwOverlayBridge, BtwOverlayComponent, type BtwDisplayEntry, type BtwOverlayView } from "./overlay.js";
@@ -88,13 +94,40 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			updateContextState(pi, state, ctx);
 			const request = args.trim();
-			if (!request) {
+
+			const selectModelFromMenu = async (initialSearchInput?: string): Promise<Model<any> | undefined> => {
+				const selectorSettingsManager = SettingsManager.inMemory();
+				return ctx.ui.custom<Model<any> | undefined>(
+					(tui, _theme, _keybindings, done) =>
+						new ModelSelectorComponent(
+							tui,
+							getDesiredBtwModel(state),
+							selectorSettingsManager,
+							ctx.modelRegistry,
+							[],
+							(model) => done(model),
+							() => done(undefined),
+							initialSearchInput,
+						),
+				);
+			};
+
+			const pinSelectedModel = async (model: Model<any>): Promise<void> => {
+				try {
+					await applyBtwModelSelection(state, { mode: "pinned", model });
+				} catch (error) {
+					ctx.ui.notify(
+						`Failed to pin /btw to ${formatModelLabel(model)}: ${error instanceof Error ? error.message : String(error)}`,
+						"error",
+					);
+					return;
+				}
+
 				ctx.ui.notify(
-					`/btw is ${describeBtwModelSelection(state)}. Use /btw-model follow-main or /btw-model <provider/model>.`,
+					`Pinned /btw to ${formatModelLabel(model)}. The main model is still ${formatModelLabel(state.model)}.`,
 					"info",
 				);
-				return;
-			}
+			};
 
 			if (request.toLowerCase() === "follow-main") {
 				try {
@@ -110,35 +143,44 @@ export default function btwExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
+			if (!request) {
+				if (!ctx.hasUI) {
+					ctx.ui.notify(
+						`/btw is ${describeBtwModelSelection(state)}. Use /btw-model follow-main or /btw-model <provider/model>.`,
+						"info",
+					);
+					return;
+				}
+
+				const selectedModel = await selectModelFromMenu();
+				if (!selectedModel) {
+					return;
+				}
+				await pinSelectedModel(selectedModel);
+				return;
+			}
+
 			const availableModels = getAvailableBtwModels(ctx.modelRegistry);
-			if (availableModels.length === 0) {
-				ctx.ui.notify("No /btw models are currently available from the main model registry.", "error");
+			const exactModel = findExactAvailableModelMatch(request, availableModels);
+			if (exactModel) {
+				await pinSelectedModel(exactModel);
 				return;
 			}
 
-			const model = findExactAvailableModelMatch(request, availableModels);
-			if (!model) {
-				ctx.ui.notify(
-					`Unknown /btw model "${request}". Use /btw-model follow-main or an exact provider/model from the current model registry.`,
-					"error",
-				);
+			if (!ctx.hasUI) {
+				const errorMessage =
+					availableModels.length === 0
+						? "No /btw models are currently available from the main model registry."
+						: `Unknown /btw model "${request}". Use /btw-model follow-main or an exact provider/model from the current model registry.`;
+				ctx.ui.notify(errorMessage, "error");
 				return;
 			}
 
-			try {
-				await applyBtwModelSelection(state, { mode: "pinned", model });
-			} catch (error) {
-				ctx.ui.notify(
-					`Failed to pin /btw to ${formatModelLabel(model)}: ${error instanceof Error ? error.message : String(error)}`,
-					"error",
-				);
+			const selectedModel = await selectModelFromMenu(request);
+			if (!selectedModel) {
 				return;
 			}
-
-			ctx.ui.notify(
-				`Pinned /btw to ${formatModelLabel(model)}. The main model is still ${formatModelLabel(state.model)}.`,
-				"info",
-			);
+			await pinSelectedModel(selectedModel);
 		},
 	});
 
