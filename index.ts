@@ -7,6 +7,10 @@ import { attachOverlayBridge, BtwOverlayBridge, BtwOverlayComponent, type BtwDis
 import { createBtwSessionRef, readBtwSessionRef, BTW_SESSION_REF_CUSTOM_TYPE, type BtwSessionRef } from "./session-ref.js";
 import { BtwSideSessionRuntime, createSideSessionFile } from "./side-session.js";
 
+type BtwModelSelection =
+	| { mode: "follow-main" }
+	| { mode: "pinned"; model: Model<any> };
+
 type MainState = {
 	bridge: BtwOverlayBridge;
 	mainSession: MainSessionTracker;
@@ -17,12 +21,14 @@ type MainState = {
 	flushPromise?: Promise<void>;
 	queuedMessages: string[];
 	model?: Model<any>;
+	btwModelSelection: BtwModelSelection;
 	thinkingLevel?: string;
 	systemPrompt: string;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
 	allowFollowUpToMain: boolean;
 	allowSteerToMain: boolean;
 };
+
 export default function btwExtension(pi: ExtensionAPI): void {
 	const mainSession = new MainSessionTracker();
 	const state: MainState = {
@@ -30,6 +36,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		mainSession,
 		mainContext: buildMainSessionContext(mainSession.snapshot()),
 		queuedMessages: [],
+		btwModelSelection: { mode: "follow-main" },
 		systemPrompt: "",
 		themeProvider: () => {
 			throw new Error("/btw theme requested before UI was available.");
@@ -76,12 +83,72 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("btw-model", {
+		description: "Set the model used by /btw without changing the main agent model",
+		handler: async (args, ctx) => {
+			updateContextState(pi, state, ctx);
+			const request = args.trim();
+			if (!request) {
+				ctx.ui.notify(
+					`/btw is ${describeBtwModelSelection(state)}. Use /btw-model follow-main or /btw-model <provider/model>.`,
+					"info",
+				);
+				return;
+			}
+
+			if (request.toLowerCase() === "follow-main") {
+				try {
+					await applyBtwModelSelection(state, { mode: "follow-main" });
+				} catch (error) {
+					ctx.ui.notify(
+						`Failed to switch /btw back to follow-main: ${error instanceof Error ? error.message : String(error)}`,
+						"error",
+					);
+					return;
+				}
+				ctx.ui.notify(`Set /btw to follow the main model (${formatModelLabel(state.model)}).`, "info");
+				return;
+			}
+
+			const availableModels = getAvailableBtwModels(ctx.modelRegistry);
+			if (availableModels.length === 0) {
+				ctx.ui.notify("No /btw models are currently available from the main model registry.", "error");
+				return;
+			}
+
+			const model = findExactAvailableModelMatch(request, availableModels);
+			if (!model) {
+				ctx.ui.notify(
+					`Unknown /btw model "${request}". Use /btw-model follow-main or an exact provider/model from the current model registry.`,
+					"error",
+				);
+				return;
+			}
+
+			try {
+				await applyBtwModelSelection(state, { mode: "pinned", model });
+			} catch (error) {
+				ctx.ui.notify(
+					`Failed to pin /btw to ${formatModelLabel(model)}: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+				return;
+			}
+
+			ctx.ui.notify(
+				`Pinned /btw to ${formatModelLabel(model)}. The main model is still ${formatModelLabel(state.model)}.`,
+				"info",
+			);
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		state.runtime?.dispose();
 		state.runtime = undefined;
 		state.bootPromise = undefined;
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
+		state.btwModelSelection = { mode: "follow-main" };
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(ctx.model));
@@ -137,11 +204,11 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.model = event.model;
 		state.mainSession.handleModelSelect(formatModelLabel(event.model));
 		refreshMainContext(state);
-		if (!state.runtime) {
+		if (!state.runtime || state.btwModelSelection.mode !== "follow-main") {
 			return;
 		}
 		try {
-			await state.runtime.syncModel(event.model, state.thinkingLevel);
+			await syncRuntimeModelSelection(state);
 		} catch (error) {
 			state.bridge.notify(`Failed to sync /btw model: ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
@@ -153,6 +220,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.bootPromise = undefined;
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
+		state.btwModelSelection = { mode: "follow-main" };
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(state.model));
@@ -163,6 +231,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.bridge.reset();
 	});
 }
+
 function updateContextState(pi: ExtensionAPI, state: MainState, ctx: ExtensionContext): void {
 	state.model = ctx.model;
 	state.thinkingLevel = pi.getThinkingLevel();
@@ -174,6 +243,92 @@ function updateContextState(pi: ExtensionAPI, state: MainState, ctx: ExtensionCo
 
 function refreshMainContext(state: MainState): void {
 	state.mainContext = buildMainSessionContext(state.mainSession.snapshot());
+}
+
+function getDesiredBtwModel(state: MainState): Model<any> | undefined {
+	return state.btwModelSelection.mode === "pinned" ? state.btwModelSelection.model : state.model;
+}
+
+function getBtwModelModeLabel(selection: BtwModelSelection): string {
+	return selection.mode === "follow-main" ? "follow main" : "pinned";
+}
+
+function describeBtwModelSelection(state: MainState): string {
+	const activeModelLabel = formatModelLabel(getDesiredBtwModel(state));
+	return state.btwModelSelection.mode === "follow-main"
+		? `following the main model (${activeModelLabel})`
+		: `pinned to ${activeModelLabel}`;
+}
+
+function getAvailableBtwModels(modelRegistry: ExtensionContext["modelRegistry"]): readonly Model<any>[] {
+	modelRegistry.refresh();
+	try {
+		return modelRegistry.getAvailable();
+	} catch {
+		return [];
+	}
+}
+
+function findExactAvailableModelMatch(
+	modelReference: string,
+	availableModels: readonly Model<any>[],
+): Model<any> | undefined {
+	const trimmedReference = modelReference.trim();
+	if (!trimmedReference) {
+		return undefined;
+	}
+
+	const normalizedReference = trimmedReference.toLowerCase();
+
+	const canonicalMatches = availableModels.filter(
+		(model) => `${model.provider}/${model.id}`.toLowerCase() === normalizedReference,
+	);
+	if (canonicalMatches.length === 1) {
+		return canonicalMatches[0];
+	}
+	if (canonicalMatches.length > 1) {
+		return undefined;
+	}
+
+	const slashIndex = trimmedReference.indexOf("/");
+	if (slashIndex !== -1) {
+		const provider = trimmedReference.substring(0, slashIndex).trim();
+		const modelId = trimmedReference.substring(slashIndex + 1).trim();
+		if (provider && modelId) {
+			const providerMatches = availableModels.filter(
+				(model) =>
+					model.provider.toLowerCase() === provider.toLowerCase() &&
+					model.id.toLowerCase() === modelId.toLowerCase(),
+			);
+			if (providerMatches.length === 1) {
+				return providerMatches[0];
+			}
+			if (providerMatches.length > 1) {
+				return undefined;
+			}
+		}
+	}
+
+	const idMatches = availableModels.filter((model) => model.id.toLowerCase() === normalizedReference);
+	return idMatches.length === 1 ? idMatches[0] : undefined;
+}
+
+async function syncRuntimeModelSelection(state: MainState): Promise<void> {
+	if (!state.runtime) {
+		return;
+	}
+	await state.runtime.syncModel(getDesiredBtwModel(state), state.thinkingLevel);
+}
+
+async function applyBtwModelSelection(state: MainState, selection: BtwModelSelection): Promise<void> {
+	const previousSelection = state.btwModelSelection;
+	state.btwModelSelection = selection;
+	try {
+		await syncRuntimeModelSelection(state);
+	} catch (error) {
+		state.btwModelSelection = previousSelection;
+		throw error;
+	}
 }
 
 function normalizeInitialMessage(args: string): string | undefined {
@@ -189,7 +344,8 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 	return {
 		isReady: () => state.runtime?.isReady() ?? false,
 		isStreaming: () => state.runtime?.isStreaming() ?? false,
-		getModelLabel: () => state.runtime?.getModelLabel() ?? formatModelLabel(state.model),
+		getModelLabel: () => state.runtime?.getModelLabel() ?? formatModelLabel(getDesiredBtwModel(state)),
+		getModelModeLabel: () => getBtwModelModeLabel(state.btwModelSelection),
 		getMainStatusLabel: () => state.mainContext.summary.mainStatus,
 		getMainModelLabel: () => state.mainContext.summary.mainModelLabel,
 		isFollowUpToMainEnabled: () => state.allowFollowUpToMain,
@@ -235,7 +391,7 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 	state.flushPromise = (async () => {
 		try {
 			const runtime = await ensureRuntime(pi, state, ctx);
-			await runtime.syncModel(state.model, state.thinkingLevel);
+			await runtime.syncModel(getDesiredBtwModel(state), state.thinkingLevel);
 
 			while (state.queuedMessages.length > 0) {
 				const message = state.queuedMessages.shift()!;
@@ -277,7 +433,8 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 			bridge: state.bridge,
 			cwd: ctx.cwd,
 			modelRegistry: ctx.modelRegistry,
-			model: state.model,
+			model: getDesiredBtwModel(state),
+			btwModelModeProvider: () => state.btwModelSelection.mode,
 			thinkingLevel: state.thinkingLevel,
 			sessionFile,
 			systemPromptProvider: () => state.systemPrompt,

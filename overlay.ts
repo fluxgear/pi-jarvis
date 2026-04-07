@@ -10,6 +10,7 @@ export interface BtwOverlayView {
 	isReady(): boolean;
 	isStreaming(): boolean;
 	getModelLabel(): string;
+	getModelModeLabel(): string;
 	getMainStatusLabel(): string;
 	getMainModelLabel(): string;
 	isFollowUpToMainEnabled(): boolean;
@@ -298,6 +299,7 @@ export class BtwOverlayComponent implements Component, Focusable {
 		return [
 			truncateToWidth(`${this.theme.bold(this.theme.fg("accent", "/btw"))}  ${this.theme.fg("accent", "Main:")} ${this.theme.fg(mainStatusColor, mainStatus)}`, innerWidth),
 			truncateToWidth(this.theme.fg("muted", `Main model: ${this.view.getMainModelLabel()}`), innerWidth, "", true),
+			truncateToWidth(this.theme.fg("muted", `/btw model: ${this.view.getModelLabel()} (${this.view.getModelModeLabel()})`), innerWidth, "", true),
 			truncateToWidth(`${followUpToggle}  ${steerToggle}`, innerWidth, "", true),
 		];
 	}

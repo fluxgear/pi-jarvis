@@ -26,6 +26,7 @@ import { buildMainSessionContext, DEFAULT_MAIN_SESSION_RECENT_LIMIT } from "../m
 import { MainSessionTracker } from "../main-session-state.js";
 import { createBtwSessionRef, readBtwSessionRef, BTW_SESSION_REF_CUSTOM_TYPE } from "../session-ref.js";
 import { BtwSideSessionRuntime, createSideSessionFile } from "../side-session.js";
+import btwExtension from "../index.js";
 
 class FakeTerminal implements Terminal {
 	private inputHandler?: (data: string) => void;
@@ -91,6 +92,7 @@ type TestOverlayViewState = {
 	mainStatus: string;
 	mainModelLabel: string;
 	modelLabel: string;
+	modelModeLabel: string;
 	displayEntries: ReturnType<BtwOverlayView["getDisplayEntries"]>;
 	sentMessages: string[];
 	followUpEnabled: boolean;
@@ -107,6 +109,7 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		mainStatus: "idle",
 		mainModelLabel: "openai/gpt-5.2",
 		modelLabel: "faux/test-model",
+		modelModeLabel: "follow main",
 		displayEntries: [{ kind: "assistant", text: "hello from /btw" }],
 		sentMessages: [],
 		followUpEnabled: false,
@@ -118,6 +121,7 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		isReady: () => state.ready,
 		isStreaming: () => state.streaming,
 		getModelLabel: () => state.modelLabel,
+		getModelModeLabel: () => state.modelModeLabel,
 		getMainStatusLabel: () => state.mainStatus,
 		getMainModelLabel: () => state.mainModelLabel,
 		isFollowUpToMainEnabled: () => state.followUpEnabled,
@@ -203,6 +207,7 @@ async function testOverlayForwardingToggleControls(): Promise<void> {
 	let lines = overlay.render(80);
 	assert.ok(lines.some((line) => line.includes("Main: busy")), "overlay header should show the current main status");
 	assert.ok(lines.some((line) => line.includes("Main model: openai/gpt-5.2")), "overlay header should show the current main model label");
+	assert.ok(lines.some((line) => line.includes("/btw model: faux/test-model (follow main)")), "overlay header should show the active /btw model and mode");
 	assert.ok(lines.some((line) => line.includes("FollowUp: off")), "overlay header should show the FollowUp toggle state");
 	assert.ok(lines.some((line) => line.includes("Steer: off")), "overlay header should show the Steer toggle state");
 	assert.equal(cursorMarkerPresent(lines), true, "message input should be focused by default");
@@ -850,6 +855,353 @@ async function withSideSessionRuntime(
 	}
 }
 
+type TestModel = ReturnType<ModelRegistry["getAvailable"]>[number];
+
+type TestNotification = {
+	message: string;
+	type: "info" | "warning" | "error";
+};
+
+type TestExtensionCommandContext = {
+	model: TestModel | undefined;
+	modelRegistry: ModelRegistry;
+	notifications: TestNotification[];
+	ui: {
+		theme: typeof theme;
+		notify: (message: string, type?: "info" | "warning" | "error") => void;
+		custom: (...args: unknown[]) => Promise<void>;
+	};
+	hasUI: boolean;
+	cwd: string;
+	sessionManager: {
+		getBranch: () => SessionEntry[];
+	};
+	isIdle: () => boolean;
+	signal: undefined;
+	abort: () => void;
+	hasPendingMessages: () => boolean;
+	shutdown: () => void;
+	getContextUsage: () => undefined;
+	compact: () => void;
+	getSystemPrompt: () => string;
+	waitForIdle: () => Promise<void>;
+	newSession: () => Promise<{ cancelled: boolean }>;
+	fork: () => Promise<{ cancelled: boolean }>;
+	navigateTree: () => Promise<{ cancelled: boolean }>;
+	switchSession: () => Promise<{ cancelled: boolean }>;
+	reload: () => Promise<void>;
+};
+
+class FakeExtensionAPI {
+	private readonly commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> | void }>();
+	private readonly listeners = new Map<string, Array<(event: unknown, ctx: unknown) => Promise<void> | void>>();
+	thinkingLevel: string | undefined = "high";
+
+	registerCommand(name: string, definition: { handler: (args: string, ctx: unknown) => Promise<void> | void }): void {
+		this.commands.set(name, definition);
+	}
+
+	on(eventName: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void): void {
+		const handlers = this.listeners.get(eventName) ?? [];
+		handlers.push(handler);
+		this.listeners.set(eventName, handlers);
+	}
+
+	appendEntry(): void {}
+
+	sendUserMessage(): void {}
+
+	getThinkingLevel(): string | undefined {
+		return this.thinkingLevel;
+	}
+
+	async runCommand(name: string, args: string, ctx: TestExtensionCommandContext): Promise<void> {
+		const command = this.commands.get(name);
+		assert.ok(command, `expected command ${name} to be registered`);
+		await command.handler(args, ctx);
+	}
+
+	async emit(eventName: string, event: unknown, ctx: TestExtensionCommandContext): Promise<void> {
+		for (const handler of this.listeners.get(eventName) ?? []) {
+			await handler(event, ctx);
+		}
+	}
+}
+
+class FakeBtwRuntime {
+	syncModelCalls: Array<{ model: TestModel | undefined; thinkingLevel: string | undefined }> = [];
+
+	constructor(public currentModel: TestModel | undefined) {}
+
+	isReady(): boolean {
+		return true;
+	}
+
+	isStreaming(): boolean {
+		return false;
+	}
+
+	getModelLabel(): string {
+		return this.currentModel ? `${this.currentModel.provider}/${this.currentModel.id}` : "model unavailable";
+	}
+
+	getDisplayEntries(): ReturnType<BtwOverlayView["getDisplayEntries"]> {
+		return [];
+	}
+
+	async sendMessage(): Promise<void> {}
+
+	async syncModel(model: TestModel | undefined, thinkingLevel: string | undefined): Promise<void> {
+		this.syncModelCalls.push({ model, thinkingLevel });
+		this.currentModel = model;
+	}
+
+	dispose(): void {}
+}
+
+type BtwExtensionHarness = {
+	api: FakeExtensionAPI;
+	ctx: TestExtensionCommandContext;
+	mainModel: TestModel;
+	pinnedModel: TestModel;
+	nextMainModel: TestModel;
+	getRuntime(): FakeBtwRuntime | undefined;
+};
+
+function createTestExtensionCommandContext(
+	cwd: string,
+	modelRegistry: ModelRegistry,
+	model: TestModel | undefined,
+): TestExtensionCommandContext {
+	const notifications: TestNotification[] = [];
+	const branchEntries: SessionEntry[] = [];
+	return {
+		model,
+		modelRegistry,
+		notifications,
+		ui: {
+			theme,
+			notify: (message, type) => {
+				notifications.push({ message, type: type ?? "info" });
+			},
+			custom: async () => undefined,
+		},
+		hasUI: true,
+		cwd,
+		sessionManager: {
+			getBranch: () => branchEntries,
+		},
+		isIdle: () => true,
+		signal: undefined,
+		abort: () => {},
+		hasPendingMessages: () => false,
+		shutdown: () => {},
+		getContextUsage: () => undefined,
+		compact: () => {},
+		getSystemPrompt: () => "main session prompt",
+		waitForIdle: async () => {},
+		newSession: async () => ({ cancelled: false }),
+		fork: async () => ({ cancelled: false }),
+		navigateTree: async () => ({ cancelled: false }),
+		switchSession: async () => ({ cancelled: false }),
+		reload: async () => {},
+	};
+}
+
+async function waitForAsyncWork(): Promise<void> {
+	await flushTicks();
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	await flushTicks();
+}
+
+async function withBtwExtensionHarness(run: (harness: BtwExtensionHarness) => Promise<void>): Promise<void> {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+	const modelRegistry = ModelRegistry.inMemory(authStorage);
+	modelRegistry.registerProvider("test-provider", {
+		api: "openai",
+		baseUrl: "https://example.com/v1",
+		apiKey: "test-key",
+		models: [
+			{
+				id: "main-alpha",
+				name: "Main Alpha",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			},
+			{
+				id: "side-beta",
+				name: "Side Beta",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			},
+			{
+				id: "next-gamma",
+				name: "Next Gamma",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			},
+		],
+	});
+
+	const mainModel = modelRegistry.find("test-provider", "main-alpha");
+	const pinnedModel = modelRegistry.find("test-provider", "side-beta");
+	const nextMainModel = modelRegistry.find("test-provider", "next-gamma");
+	assert.ok(mainModel, "expected the harness main model to exist");
+	assert.ok(pinnedModel, "expected the harness pinned model to exist");
+	assert.ok(nextMainModel, "expected the harness next main model to exist");
+
+	const api = new FakeExtensionAPI();
+	const ctx = createTestExtensionCommandContext(cwd, modelRegistry, mainModel);
+	let runtime: FakeBtwRuntime | undefined;
+
+	const originalCreate = BtwSideSessionRuntime.create;
+	const replacement: typeof BtwSideSessionRuntime.create = async (options) => {
+		runtime = new FakeBtwRuntime(options.model as TestModel | undefined);
+		return runtime as unknown as BtwSideSessionRuntime;
+	};
+	(BtwSideSessionRuntime as { create: typeof BtwSideSessionRuntime.create }).create = replacement;
+
+	try {
+		btwExtension(api as unknown as Parameters<typeof btwExtension>[0]);
+		await api.emit("session_start", {}, ctx);
+		await run({
+			api,
+			ctx,
+			mainModel,
+			pinnedModel,
+			nextMainModel,
+			getRuntime: () => runtime,
+		});
+	} finally {
+		(BtwSideSessionRuntime as { create: typeof BtwSideSessionRuntime.create }).create = originalCreate;
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function openBtwRuntime(harness: BtwExtensionHarness): Promise<FakeBtwRuntime> {
+	await harness.api.runCommand("btw", "", harness.ctx);
+	await waitForAsyncWork();
+	const runtime = harness.getRuntime();
+	assert.ok(runtime, "/btw should boot a side-session runtime");
+	return runtime;
+}
+
+async function testBtwModelDefaultFollowMainBehavior(): Promise<void> {
+	await withBtwExtensionHarness(async (harness) => {
+		const runtime = await openBtwRuntime(harness);
+		assert.equal(runtime.currentModel?.id, harness.mainModel.id, "/btw should start on the current main model by default");
+
+		harness.ctx.model = harness.nextMainModel;
+		await harness.api.emit("model_select", { model: harness.nextMainModel }, harness.ctx);
+
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.nextMainModel.id,
+			"/btw should continue following main model_select events until explicitly pinned",
+		);
+		assert.deepEqual(
+			runtime.syncModelCalls.map((call) => call.model?.id),
+			[harness.nextMainModel.id],
+			"default follow-main mode should sync the /btw runtime when the main model changes",
+		);
+	});
+}
+
+async function testBtwModelOverrideAndStateSeparation(): Promise<void> {
+	await withBtwExtensionHarness(async (harness) => {
+		await harness.api.runCommand("btw-model", "side-beta", harness.ctx);
+		assert.equal(
+			harness.ctx.model?.id,
+			harness.mainModel.id,
+			"/btw-model must not mutate the main session model state",
+		);
+
+		const runtime = await openBtwRuntime(harness);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.pinnedModel.id,
+			"a pinned /btw model should be used when the side runtime starts later",
+		);
+		assert.ok(
+			harness.ctx.notifications.some((notification) =>
+				notification.message.includes(`Pinned /btw to ${harness.pinnedModel.provider}/${harness.pinnedModel.id}`),
+			),
+			"/btw-model should report the pinned /btw model without changing the main model",
+		);
+	});
+}
+
+async function testPinnedBtwModelNotClobberedByMainModelSelect(): Promise<void> {
+	await withBtwExtensionHarness(async (harness) => {
+		await harness.api.runCommand("btw-model", "side-beta", harness.ctx);
+		const runtime = await openBtwRuntime(harness);
+		assert.equal(runtime.syncModelCalls.length, 0, "pinning before /btw starts should not require a live runtime sync");
+
+		harness.ctx.model = harness.nextMainModel;
+		await harness.api.emit("model_select", { model: harness.nextMainModel }, harness.ctx);
+
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.pinnedModel.id,
+			"main model_select must not clobber a pinned /btw model",
+		);
+		assert.equal(runtime.syncModelCalls.length, 0, "no /btw runtime sync should happen while the /btw model is pinned");
+	});
+}
+
+async function testBtwModelReturnToFollowMainBehavior(): Promise<void> {
+	await withBtwExtensionHarness(async (harness) => {
+		await harness.api.runCommand("btw-model", "side-beta", harness.ctx);
+		const runtime = await openBtwRuntime(harness);
+
+		harness.ctx.model = harness.nextMainModel;
+		await harness.api.emit("model_select", { model: harness.nextMainModel }, harness.ctx);
+		assert.equal(runtime.currentModel?.id, harness.pinnedModel.id, "the pinned /btw model should remain active before follow-main is restored");
+
+		await harness.api.runCommand("btw-model", "follow-main", harness.ctx);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.nextMainModel.id,
+			"follow-main should immediately resync /btw to the current main model",
+		);
+
+		harness.ctx.model = harness.mainModel;
+		await harness.api.emit("model_select", { model: harness.mainModel }, harness.ctx);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.mainModel.id,
+			"after follow-main is restored, later main model changes should sync /btw again",
+		);
+		assert.deepEqual(
+			runtime.syncModelCalls.map((call) => call.model?.id),
+			[harness.nextMainModel.id, harness.mainModel.id],
+			"only the explicit follow-main reset and later main model_select should sync the runtime after pinning",
+		);
+	});
+}
+
 async function testSideSessionToolWhitelist(): Promise<void> {
 	await withSideSessionRuntime({}, async (_runtime, probe) => {
 		assert.ok(probe.session, "side session runtime should expose the underlying session");
@@ -1299,6 +1651,10 @@ async function main(): Promise<void> {
 	await testOverlayConfirmationRenderingAndKeys();
 	await testHandleMessageStartMarksAssistantStreaming();
 	await testMainSessionTrackerToolExecutionKeying();
+	await testBtwModelDefaultFollowMainBehavior();
+	await testBtwModelOverrideAndStateSeparation();
+	await testPinnedBtwModelNotClobberedByMainModelSelect();
+	await testBtwModelReturnToFollowMainBehavior();
 	await testSideSessionPersistence();
 	await testSideSessionUsesMainSystemPrompt();
 	await testSideSessionToolWhitelist();

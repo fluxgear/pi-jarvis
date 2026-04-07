@@ -30,6 +30,7 @@ type SideRuntimeCreateOptions = {
 	cwd: string;
 	modelRegistry: ExtensionContext["modelRegistry"];
 	model: Model<any> | undefined;
+	btwModelModeProvider?: () => "follow-main" | "pinned";
 	thinkingLevel: string | undefined;
 	sessionFile: string;
 	systemPromptProvider: () => string;
@@ -164,69 +165,73 @@ export class BtwSideSessionRuntime {
 		this.bridge.detach();
 	}
 
-private async initialize(options: SideRuntimeCreateOptions): Promise<void> {
-	const sideSessionManager = SessionManager.open(options.sessionFile, dirname(options.sessionFile));
-	const persistedContext = sideSessionManager.buildSessionContext();
-	const hadExistingEntries = sideSessionManager.getEntries().length > 0;
+	private async initialize(options: SideRuntimeCreateOptions): Promise<void> {
+		const sideSessionManager = SessionManager.open(options.sessionFile, dirname(options.sessionFile));
+		const persistedContext = sideSessionManager.buildSessionContext();
+		const hadExistingEntries = sideSessionManager.getEntries().length > 0;
 
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: options.cwd,
-		agentDir: getAgentDir(),
-		noExtensions: true,
-		extensionFactories: [
-			createSideExtensionFactory(
-				options.systemPromptProvider,
-				options.mainContextProvider,
-				options.communicationPermissionsProvider,
-				options.sendFollowUpToMain,
-				options.confirmSteerToMain,
-				options.sendSteerToMain,
-			),
-		],
-	});
-	await resourceLoader.reload();
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: options.cwd,
+			agentDir: getAgentDir(),
+			noExtensions: true,
+			extensionFactories: [
+				createSideExtensionFactory(
+					options.systemPromptProvider,
+					options.mainContextProvider,
+					() => ({
+						activeModelLabel: formatModelLabel(this.session?.model),
+						mode: options.btwModelModeProvider?.() ?? "follow-main",
+					}),
+					options.communicationPermissionsProvider,
+					options.sendFollowUpToMain,
+					options.confirmSteerToMain,
+					options.sendSteerToMain,
+				),
+			],
+		});
+		await resourceLoader.reload();
 
-	const { session, modelFallbackMessage } = await createAgentSession({
-		cwd: options.cwd,
-		agentDir: getAgentDir(),
-		modelRegistry: options.modelRegistry as any,
-		model: options.model,
-		thinkingLevel: options.thinkingLevel as any,
-		tools: [],
-		resourceLoader,
-		sessionManager: sideSessionManager,
-	});
-	this.session = session;
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: options.cwd,
+			agentDir: getAgentDir(),
+			modelRegistry: options.modelRegistry as any,
+			model: options.model,
+			thinkingLevel: options.thinkingLevel as any,
+			tools: [],
+			resourceLoader,
+			sessionManager: sideSessionManager,
+		});
+		this.session = session;
 
-	await session.bindExtensions({
-		uiContext: createSideUiContext(this.bridge, options.themeProvider),
-		onError: (error) => {
-			this.bridge.notify(`Side extension error: ${error.error}`, "error");
-		},
-	});
+		await session.bindExtensions({
+			uiContext: createSideUiContext(this.bridge, options.themeProvider),
+			onError: (error) => {
+				this.bridge.notify(`Side extension error: ${error.error}`, "error");
+			},
+		});
 
-	if (options.model && hadExistingEntries) {
-		const previousModel = persistedContext.model;
-		if (!previousModel || previousModel.provider !== options.model.provider || previousModel.modelId !== options.model.id) {
-			await session.setModel(options.model);
+		if (options.model && hadExistingEntries) {
+			const previousModel = persistedContext.model;
+			if (!previousModel || previousModel.provider !== options.model.provider || previousModel.modelId !== options.model.id) {
+				await session.setModel(options.model);
+			}
 		}
-	}
-	if (options.thinkingLevel && persistedContext.thinkingLevel !== options.thinkingLevel) {
-		session.setThinkingLevel(options.thinkingLevel as any);
-	}
+		if (options.thinkingLevel && persistedContext.thinkingLevel !== options.thinkingLevel) {
+			session.setThinkingLevel(options.thinkingLevel as any);
+		}
 
-	this.modelLabel = formatModelLabel(session.model);
-	this.ready = true;
-	this.bootError = modelFallbackMessage;
-	if (modelFallbackMessage) {
-		this.bridge.notify(modelFallbackMessage, "warning");
-	}
+		this.modelLabel = formatModelLabel(session.model);
+		this.ready = true;
+		this.bootError = modelFallbackMessage;
+		if (modelFallbackMessage) {
+			this.bridge.notify(modelFallbackMessage, "warning");
+		}
 
-	this.refreshHistory();
-	this.unsubscribe = session.subscribe((event) => {
-		this.handleEvent(event);
-	});
-}
+		this.refreshHistory();
+		this.unsubscribe = session.subscribe((event) => {
+			this.handleEvent(event);
+		});
+	}
 
 	private handleEvent(event: AgentSessionEvent): void {
 		switch (event.type) {
@@ -280,6 +285,7 @@ private async initialize(options: SideRuntimeCreateOptions): Promise<void> {
 function createSideExtensionFactory(
 	getMainSystemPrompt: SideRuntimeCreateOptions["systemPromptProvider"],
 	getMainContext: SideRuntimeCreateOptions["mainContextProvider"],
+	getBtwModelState: () => { activeModelLabel: string; mode: "follow-main" | "pinned" },
 	getCommunicationPermissions: SideRuntimeCreateOptions["communicationPermissionsProvider"],
 	sendFollowUpToMain: SideRuntimeCreateOptions["sendFollowUpToMain"],
 	confirmSteerToMain: SideRuntimeCreateOptions["confirmSteerToMain"],
@@ -363,9 +369,15 @@ function createSideExtensionFactory(
 
 		pi.on("before_agent_start", async () => {
 			const mainContext = getMainContext();
+			const btwModelState = getBtwModelState();
+			const btwModelPrompt =
+				btwModelState.mode === "follow-main"
+					? `/btw model for this turn: ${btwModelState.activeModelLabel} (following main model)`
+					: `/btw model for this turn: ${btwModelState.activeModelLabel} (pinned override)`;
 			const systemPrompt = [
 				getMainSystemPrompt().trim(),
 				SIDE_SYSTEM_PROMPT,
+				btwModelPrompt,
 				getCommunicationPrompt(),
 				"Injected main-session context for this /btw turn:",
 				mainContext.summaryText.trim(),
