@@ -10,7 +10,6 @@ export interface BtwOverlayView {
 	isReady(): boolean;
 	isStreaming(): boolean;
 	getModelLabel(): string;
-	getModeLabel(): string;
 	getMainStatusLabel(): string;
 	getMainModelLabel(): string;
 	isFollowUpToMainEnabled(): boolean;

@@ -99,10 +99,6 @@ export class BtwSideSessionRuntime {
 		return this.modelLabel;
 	}
 
-	getModeLabel(): string {
-		return "advisory only";
-	}
-
 	getDisplayEntries(): BtwDisplayEntry[] {
 		const entries = [...this.historyEntries];
 

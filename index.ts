@@ -191,7 +191,6 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 		isReady: () => state.runtime?.isReady() ?? false,
 		isStreaming: () => state.runtime?.isStreaming() ?? false,
 		getModelLabel: () => state.runtime?.getModelLabel() ?? formatModelLabel(state.model),
-		getModeLabel: () => state.runtime?.getModeLabel() ?? "advisory only",
 		getMainStatusLabel: () => state.mainContext.summary.mainStatus,
 		getMainModelLabel: () => state.mainContext.summary.mainModelLabel,
 		isFollowUpToMainEnabled: () => state.allowFollowUpToMain,

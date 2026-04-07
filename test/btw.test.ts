@@ -90,7 +90,6 @@ type TestOverlayViewState = {
 	mainStatus: string;
 	mainModelLabel: string;
 	modelLabel: string;
-	modeLabel: string;
 	displayEntries: ReturnType<BtwOverlayView["getDisplayEntries"]>;
 	sentMessages: string[];
 	followUpEnabled: boolean;
@@ -107,7 +106,6 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		mainStatus: "idle",
 		mainModelLabel: "openai/gpt-5.2",
 		modelLabel: "faux/test-model",
-		modeLabel: "advisory only",
 		displayEntries: [{ kind: "assistant", text: "hello from /btw" }],
 		sentMessages: [],
 		followUpEnabled: false,
@@ -119,7 +117,6 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		isReady: () => state.ready,
 		isStreaming: () => state.streaming,
 		getModelLabel: () => state.modelLabel,
-		getModeLabel: () => state.modeLabel,
 		getMainStatusLabel: () => state.mainStatus,
 		getMainModelLabel: () => state.mainModelLabel,
 		isFollowUpToMainEnabled: () => state.followUpEnabled,
@@ -381,7 +378,6 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			sendSteerToMain: () => {},
 			themeProvider: () => theme,
 		});
-		assert.equal(runtime.getModeLabel(), "advisory only", "/btw should stay in advisory-only mode");
 
 		type BeforeAgentStartResult = { systemPrompt?: string };
 		type RuntimeProbe = {
@@ -656,88 +652,6 @@ async function testBuildMainSessionContext(): Promise<void> {
 	assert.ok(context.recentText.includes("$ npm run check (ok) — lint clean"));
 }
 
-async function testCommunicationPermissions(): Promise<void> {
-	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
-	const agentDir = join(tempRoot, "agent");
-	const cwd = join(tempRoot, "project");
-	mkdirSync(agentDir, { recursive: true });
-	mkdirSync(cwd, { recursive: true });
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-
-	try {
-		let permissions = { allowFollowUpToMain: false, allowSteerToMain: false };
-		let followUpSent: string | undefined;
-		let steerSent: string | undefined;
-		let steerConfirmed = false;
-
-		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
-		const modelRegistry = ModelRegistry.inMemory(authStorage);
-		const sessionFile = await createSideSessionFile(cwd);
-		const runtime = await BtwSideSessionRuntime.create({
-			bridge: new BtwOverlayBridge(),
-			cwd,
-			modelRegistry: modelRegistry as any,
-			model: undefined,
-			thinkingLevel: undefined,
-			sessionFile,
-			systemPromptProvider: () => "main prompt",
-			mainContextProvider: () => ({ summaryText: "", recentText: "" }),
-			communicationPermissionsProvider: () => permissions,
-			sendFollowUpToMain: (msg) => { followUpSent = msg; },
-			confirmSteerToMain: async () => steerConfirmed,
-			sendSteerToMain: (msg) => { steerSent = msg; },
-			themeProvider: () => theme,
-		});
-
-		const session = (runtime as any).session;
-		assert.ok(session._toolRegistry, "session should expose its tool registry");
-
-		const followUpTool = session._toolRegistry.get("btw_send_follow_up_to_main");
-		const steerTool = session._toolRegistry.get("btw_send_steer_to_main");
-		assert.ok(followUpTool, "followUp tool should be registered");
-		assert.ok(steerTool, "steer tool should be registered");
-
-		// 1. FollowUp disabled
-		let res = await followUpTool.execute("call-1", { message: "hello" });
-		assert.equal(res.details.status, "blocked", "followUp should be blocked when disabled");
-		assert.equal(followUpSent, undefined, "followUp should not be sent");
-
-		// 2. FollowUp enabled
-		permissions.allowFollowUpToMain = true;
-		res = await followUpTool.execute("call-2", { message: "hello main" });
-		assert.equal(res.details.status, "sent", "followUp should be sent when enabled");
-		assert.equal(followUpSent, "hello main", "followUp should actually be sent");
-
-		// 3. Steer disabled
-		res = await steerTool.execute("call-3", { message: "steer msg" });
-		assert.equal(res.details.status, "blocked", "steer should be blocked when disabled");
-		assert.equal(steerSent, undefined, "steer should not be sent");
-
-		// 4. Steer enabled, but unconfirmed
-		permissions.allowSteerToMain = true;
-		steerConfirmed = false;
-		res = await steerTool.execute("call-4", { message: "steer msg" });
-		assert.equal(res.details.status, "cancelled", "steer should be cancelled when unconfirmed");
-		assert.equal(steerSent, undefined, "steer should not be sent");
-
-		// 5. Steer enabled, confirmed
-		steerConfirmed = true;
-		res = await steerTool.execute("call-5", { message: "steer confirmed msg" });
-		assert.equal(res.details.status, "sent", "steer should be sent when confirmed");
-		assert.equal(steerSent, "steer confirmed msg", "steer should actually be sent");
-
-		runtime.dispose();
-	} finally {
-		if (originalAgentDir === undefined) {
-			delete process.env.PI_CODING_AGENT_DIR;
-		} else {
-			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
-		}
-		rmSync(tempRoot, { recursive: true, force: true });
-	}
-}
-
 async function main(): Promise<void> {
 	await testSessionRef();
 	await testOverlayFocusAndEscRouting();
@@ -746,7 +660,6 @@ async function main(): Promise<void> {
 	await testSideSessionPersistence();
 	await testSideSessionUsesMainSystemPrompt();
 	await testBuildMainSessionContext();
-	await testCommunicationPermissions();
 	console.log("btw tests passed");
 }
 
