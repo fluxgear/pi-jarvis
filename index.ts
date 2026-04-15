@@ -9,25 +9,25 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { buildMainSessionContext, type MainSessionContextPayload } from "./main-context.js";
 import { MainSessionTracker } from "./main-session-state.js";
-import { attachOverlayBridge, BtwOverlayBridge, BtwOverlayComponent, type BtwDisplayEntry, type BtwOverlayView } from "./overlay.js";
-import { createBtwSessionRef, readBtwSessionRef, BTW_SESSION_REF_CUSTOM_TYPE, type BtwSessionRef } from "./session-ref.js";
-import { BtwSideSessionRuntime, createSideSessionFile } from "./side-session.js";
+import { attachOverlayBridge, JarvisOverlayBridge, JarvisOverlayComponent, type JarvisDisplayEntry, type JarvisOverlayView } from "./overlay.js";
+import { createJarvisSessionRef, readJarvisSessionRef, JARVIS_SESSION_REF_CUSTOM_TYPE, type JarvisSessionRef } from "./session-ref.js";
+import { JarvisSideSessionRuntime, createSideSessionFile } from "./side-session.js";
 
-type BtwModelSelection =
+type JarvisModelSelection =
 	| { mode: "follow-main" }
 	| { mode: "pinned"; model: Model<any> };
 
 type MainState = {
-	bridge: BtwOverlayBridge;
+	bridge: JarvisOverlayBridge;
 	mainSession: MainSessionTracker;
 	mainContext: MainSessionContextPayload;
-	sessionRef?: BtwSessionRef;
-	runtime?: BtwSideSessionRuntime;
-	bootPromise?: Promise<BtwSideSessionRuntime>;
+	sessionRef?: JarvisSessionRef;
+	runtime?: JarvisSideSessionRuntime;
+	bootPromise?: Promise<JarvisSideSessionRuntime>;
 	flushPromise?: Promise<void>;
 	queuedMessages: string[];
 	model?: Model<any>;
-	btwModelSelection: BtwModelSelection;
+	jarvisModelSelection: JarvisModelSelection;
 	thinkingLevel?: string;
 	systemPrompt: string;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
@@ -35,24 +35,24 @@ type MainState = {
 	allowSteerToMain: boolean;
 };
 
-export default function btwExtension(pi: ExtensionAPI): void {
+export default function jarvisExtension(pi: ExtensionAPI): void {
 	const mainSession = new MainSessionTracker();
 	const state: MainState = {
-		bridge: new BtwOverlayBridge(),
+		bridge: new JarvisOverlayBridge(),
 		mainSession,
 		mainContext: buildMainSessionContext(mainSession.snapshot()),
 		queuedMessages: [],
-		btwModelSelection: { mode: "follow-main" },
+		jarvisModelSelection: { mode: "follow-main" },
 		systemPrompt: "",
 		themeProvider: () => {
-			throw new Error("/btw theme requested before UI was available.");
+			throw new Error("/jarvis theme requested before UI was available.");
 		},
 		allowFollowUpToMain: false,
 		allowSteerToMain: false,
 	};
 
-	pi.registerCommand("btw", {
-		description: "Open the /btw side conversation overlay",
+	pi.registerCommand("jarvis", {
+		description: "Open the /jarvis side conversation overlay",
 		handler: async (args, ctx) => {
 			updateContextState(pi, state, ctx);
 
@@ -71,7 +71,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 				(tui, theme, _keybindings, done) => {
 					state.themeProvider = () => theme;
 					return attachOverlayBridge(
-						new BtwOverlayComponent(tui, theme, state.bridge, overlayView, () => done(undefined)),
+						new JarvisOverlayComponent(tui, theme, state.bridge, overlayView, () => done(undefined)),
 						state.bridge,
 						tui,
 					);
@@ -89,8 +89,8 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("btw-model", {
-		description: "Set the model used by /btw without changing the main agent model",
+	pi.registerCommand("jarvis-model", {
+		description: "Set the model used by /jarvis without changing the main agent model",
 		handler: async (args, ctx) => {
 			updateContextState(pi, state, ctx);
 			const request = args.trim();
@@ -101,7 +101,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 					(tui, _theme, _keybindings, done) =>
 						new ModelSelectorComponent(
 							tui,
-							getDesiredBtwModel(state),
+							getDesiredJarvisModel(state),
 							selectorSettingsManager,
 							ctx.modelRegistry,
 							[],
@@ -114,39 +114,39 @@ export default function btwExtension(pi: ExtensionAPI): void {
 
 			const pinSelectedModel = async (model: Model<any>): Promise<void> => {
 				try {
-					await applyBtwModelSelection(state, { mode: "pinned", model });
+					await applyJarvisModelSelection(state, { mode: "pinned", model });
 				} catch (error) {
 					ctx.ui.notify(
-						`Failed to pin /btw to ${formatModelLabel(model)}: ${error instanceof Error ? error.message : String(error)}`,
+						`Failed to pin /jarvis to ${formatModelLabel(model)}: ${error instanceof Error ? error.message : String(error)}`,
 						"error",
 					);
 					return;
 				}
 
 				ctx.ui.notify(
-					`Pinned /btw to ${formatModelLabel(model)}. The main model is still ${formatModelLabel(state.model)}.`,
+					`Pinned /jarvis to ${formatModelLabel(model)}. The main model is still ${formatModelLabel(state.model)}.`,
 					"info",
 				);
 			};
 
 			if (request.toLowerCase() === "follow-main") {
 				try {
-					await applyBtwModelSelection(state, { mode: "follow-main" });
+					await applyJarvisModelSelection(state, { mode: "follow-main" });
 				} catch (error) {
 					ctx.ui.notify(
-						`Failed to switch /btw back to follow-main: ${error instanceof Error ? error.message : String(error)}`,
+						`Failed to switch /jarvis back to follow-main: ${error instanceof Error ? error.message : String(error)}`,
 						"error",
 					);
 					return;
 				}
-				ctx.ui.notify(`Set /btw to follow the main model (${formatModelLabel(state.model)}).`, "info");
+				ctx.ui.notify(`Set /jarvis to follow the main model (${formatModelLabel(state.model)}).`, "info");
 				return;
 			}
 
 			if (!request) {
 				if (!ctx.hasUI) {
 					ctx.ui.notify(
-						`/btw is ${describeBtwModelSelection(state)}. Use /btw-model follow-main or /btw-model <provider/model>.`,
+						`/jarvis is ${describeJarvisModelSelection(state)}. Use /jarvis-model follow-main or /jarvis-model <provider/model>.`,
 						"info",
 					);
 					return;
@@ -160,7 +160,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const availableModels = getAvailableBtwModels(ctx.modelRegistry);
+			const availableModels = getAvailableJarvisModels(ctx.modelRegistry);
 			const exactModel = findExactAvailableModelMatch(request, availableModels);
 			if (exactModel) {
 				await pinSelectedModel(exactModel);
@@ -170,8 +170,8 @@ export default function btwExtension(pi: ExtensionAPI): void {
 			if (!ctx.hasUI) {
 				const errorMessage =
 					availableModels.length === 0
-						? "No /btw models are currently available from the main model registry."
-						: `Unknown /btw model "${request}". Use /btw-model follow-main or an exact provider/model from the current model registry.`;
+						? "No /jarvis models are currently available from the main model registry."
+						: `Unknown /jarvis model "${request}". Use /jarvis-model follow-main or an exact provider/model from the current model registry.`;
 				ctx.ui.notify(errorMessage, "error");
 				return;
 			}
@@ -190,12 +190,13 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.bootPromise = undefined;
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
-		state.btwModelSelection = { mode: "follow-main" };
+		state.jarvisModelSelection = { mode: "follow-main" };
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(ctx.model));
 		updateContextState(pi, state, ctx);
-		state.sessionRef = readBtwSessionRef(ctx.sessionManager.getBranch());
+		enforceCompatibilityGuard(state);
+		state.sessionRef = readJarvisSessionRef(ctx.sessionManager.getBranch());
 		state.bridge.reset();
 	});
 
@@ -246,13 +247,14 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.model = event.model;
 		state.mainSession.handleModelSelect(formatModelLabel(event.model));
 		refreshMainContext(state);
-		if (!state.runtime || state.btwModelSelection.mode !== "follow-main") {
+		enforceCompatibilityGuard(state);
+		if (!state.runtime || state.jarvisModelSelection.mode !== "follow-main") {
 			return;
 		}
 		try {
 			await syncRuntimeModelSelection(state);
 		} catch (error) {
-			state.bridge.notify(`Failed to sync /btw model: ${error instanceof Error ? error.message : String(error)}`, "error");
+			state.bridge.notify(`Failed to sync /jarvis model: ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
 	});
 
@@ -262,7 +264,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		state.bootPromise = undefined;
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
-		state.btwModelSelection = { mode: "follow-main" };
+		state.jarvisModelSelection = { mode: "follow-main" };
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(state.model));
@@ -287,22 +289,49 @@ function refreshMainContext(state: MainState): void {
 	state.mainContext = buildMainSessionContext(state.mainSession.snapshot());
 }
 
-function getDesiredBtwModel(state: MainState): Model<any> | undefined {
-	return state.btwModelSelection.mode === "pinned" ? state.btwModelSelection.model : state.model;
+function getDesiredJarvisModel(state: MainState): Model<any> | undefined {
+	return state.jarvisModelSelection.mode === "pinned" ? state.jarvisModelSelection.model : state.model;
 }
 
-function getBtwModelModeLabel(selection: BtwModelSelection): string {
+function getDesiredJarvisThinkingLevel(state: MainState): string | undefined {
+	const desiredModel = getDesiredJarvisModel(state);
+	if (desiredModel?.provider === "xai") {
+		return "off";
+	}
+	return state.jarvisModelSelection.mode === "follow-main" ? state.thinkingLevel : "off";
+}
+
+function isModelBridgeCompatible(model: Model<any> | undefined): boolean {
+	if (!model) {
+		return true;
+	}
+	if (model.provider === "xai" && model.id.includes("multi-agent")) {
+		return false;
+	}
+	return true;
+}
+
+function enforceCompatibilityGuard(state: MainState): void {
+	const desired = getDesiredJarvisModel(state);
+	if (!isModelBridgeCompatible(desired)) {
+		state.allowFollowUpToMain = false;
+		state.allowSteerToMain = false;
+		state.bridge.notify(`Disabled FollowUp/Steer: ${formatModelLabel(desired)} does not support bridge tools.`, "warning");
+	}
+}
+
+function getJarvisModelModeLabel(selection: JarvisModelSelection): string {
 	return selection.mode === "follow-main" ? "follow main" : "pinned";
 }
 
-function describeBtwModelSelection(state: MainState): string {
-	const activeModelLabel = formatModelLabel(getDesiredBtwModel(state));
-	return state.btwModelSelection.mode === "follow-main"
+function describeJarvisModelSelection(state: MainState): string {
+	const activeModelLabel = formatModelLabel(getDesiredJarvisModel(state));
+	return state.jarvisModelSelection.mode === "follow-main"
 		? `following the main model (${activeModelLabel})`
 		: `pinned to ${activeModelLabel}`;
 }
 
-function getAvailableBtwModels(modelRegistry: ExtensionContext["modelRegistry"]): readonly Model<any>[] {
+function getAvailableJarvisModels(modelRegistry: ExtensionContext["modelRegistry"]): readonly Model<any>[] {
 	modelRegistry.refresh();
 	try {
 		return modelRegistry.getAvailable();
@@ -359,16 +388,17 @@ async function syncRuntimeModelSelection(state: MainState): Promise<void> {
 	if (!state.runtime) {
 		return;
 	}
-	await state.runtime.syncModel(getDesiredBtwModel(state), state.thinkingLevel);
+	await state.runtime.syncModel(getDesiredJarvisModel(state), getDesiredJarvisThinkingLevel(state));
 }
 
-async function applyBtwModelSelection(state: MainState, selection: BtwModelSelection): Promise<void> {
-	const previousSelection = state.btwModelSelection;
-	state.btwModelSelection = selection;
+async function applyJarvisModelSelection(state: MainState, selection: JarvisModelSelection): Promise<void> {
+	const previousSelection = state.jarvisModelSelection;
+	state.jarvisModelSelection = selection;
 	try {
 		await syncRuntimeModelSelection(state);
+		enforceCompatibilityGuard(state);
 	} catch (error) {
-		state.btwModelSelection = previousSelection;
+		state.jarvisModelSelection = previousSelection;
 		throw error;
 	}
 }
@@ -382,20 +412,28 @@ function queueMessage(state: MainState, message: string): void {
 	state.queuedMessages.push(message);
 }
 
-function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCommandContext): BtwOverlayView {
+function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCommandContext): JarvisOverlayView {
 	return {
 		isReady: () => state.runtime?.isReady() ?? false,
 		isStreaming: () => state.runtime?.isStreaming() ?? false,
-		getModelLabel: () => state.runtime?.getModelLabel() ?? formatModelLabel(getDesiredBtwModel(state)),
-		getModelModeLabel: () => getBtwModelModeLabel(state.btwModelSelection),
+		getModelLabel: () => state.runtime?.getModelLabel() ?? formatModelLabel(getDesiredJarvisModel(state)),
+		getModelModeLabel: () => getJarvisModelModeLabel(state.jarvisModelSelection),
 		getMainStatusLabel: () => state.mainContext.summary.mainStatus,
 		getMainModelLabel: () => state.mainContext.summary.mainModelLabel,
 		isFollowUpToMainEnabled: () => state.allowFollowUpToMain,
 		isSteerToMainEnabled: () => state.allowSteerToMain,
 		toggleFollowUpToMain: () => {
+			if (!isModelBridgeCompatible(getDesiredJarvisModel(state))) {
+				state.bridge.notify("FollowUp is not supported by the current /jarvis model.", "warning");
+				return;
+			}
 			state.allowFollowUpToMain = !state.allowFollowUpToMain;
 		},
 		toggleSteerToMain: () => {
+			if (!isModelBridgeCompatible(getDesiredJarvisModel(state))) {
+				state.bridge.notify("Steer is not supported by the current /jarvis model.", "warning");
+				return;
+			}
 			state.allowSteerToMain = !state.allowSteerToMain;
 		},
 		getDisplayEntries: () => getOverlayEntries(state),
@@ -406,15 +444,21 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 	};
 }
 
-function getOverlayEntries(state: MainState): BtwDisplayEntry[] {
+function getOverlayEntries(state: MainState): JarvisDisplayEntry[] {
+	let entries: JarvisDisplayEntry[];
 	if (state.runtime) {
-		return state.runtime.getDisplayEntries();
+		entries = state.runtime.getDisplayEntries();
+	} else {
+		entries = [{ kind: "system", text: "Starting /jarvis side conversation…" }];
+		if (state.queuedMessages.length > 0) {
+			entries.push({ kind: "status", text: `Queued ${state.queuedMessages.length} message${state.queuedMessages.length === 1 ? "" : "s"}…` });
+		}
 	}
 
-	const entries: BtwDisplayEntry[] = [{ kind: "system", text: "Starting /btw side conversation…" }];
-	if (state.queuedMessages.length > 0) {
-		entries.push({ kind: "status", text: `Queued ${state.queuedMessages.length} message${state.queuedMessages.length === 1 ? "" : "s"}…` });
+	if (!isModelBridgeCompatible(getDesiredJarvisModel(state))) {
+		entries.push({ kind: "status", text: "Relay disabled: current /jarvis model is incompatible with bridge tools" });
 	}
+
 	return entries;
 }
 
@@ -425,7 +469,7 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 		return state.flushPromise;
 	}
 
-	// flushQueuedMessages is awaited in fire-and-forget paths (the /btw command
+	// flushQueuedMessages is awaited in fire-and-forget paths (the /jarvis command
 	// handler's initial message flush and the overlay input submit). Any error
 	// that propagates out of here becomes an unhandled promise rejection, so the
 	// IIFE must catch and surface every failure via bridge.notify rather than
@@ -433,19 +477,19 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 	state.flushPromise = (async () => {
 		try {
 			const runtime = await ensureRuntime(pi, state, ctx);
-			await runtime.syncModel(getDesiredBtwModel(state), state.thinkingLevel);
+			await runtime.syncModel(getDesiredJarvisModel(state), state.thinkingLevel);
 
 			while (state.queuedMessages.length > 0) {
 				const message = state.queuedMessages.shift()!;
 				try {
 					await runtime.sendMessage(message);
 				} catch (error) {
-					state.bridge.notify(`Failed to send /btw message: ${error instanceof Error ? error.message : String(error)}`, "error");
+					state.bridge.notify(`Failed to send /jarvis message: ${error instanceof Error ? error.message : String(error)}`, "error");
 					break;
 				}
 			}
 		} catch (error) {
-			state.bridge.notify(`/btw startup failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			state.bridge.notify(`/jarvis startup failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
 	})().finally(() => {
 		state.flushPromise = undefined;
@@ -454,7 +498,7 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 	return state.flushPromise;
 }
 
-async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionCommandContext): Promise<BtwSideSessionRuntime> {
+async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionCommandContext): Promise<JarvisSideSessionRuntime> {
 	if (state.runtime) {
 		return state.runtime;
 	}
@@ -462,22 +506,22 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 		return state.bootPromise;
 	}
 
-	state.bridge.setWorkingMessage("Starting /btw…");
+	state.bridge.setWorkingMessage("Starting /jarvis…");
 	state.bootPromise = (async () => {
 		let sessionFile = state.sessionRef?.file;
 		if (!sessionFile || !existsSync(sessionFile)) {
 			sessionFile = await createSideSessionFile(ctx.cwd);
-			state.sessionRef = createBtwSessionRef(sessionFile);
-			pi.appendEntry(BTW_SESSION_REF_CUSTOM_TYPE, state.sessionRef);
+			state.sessionRef = createJarvisSessionRef(sessionFile);
+			pi.appendEntry(JARVIS_SESSION_REF_CUSTOM_TYPE, state.sessionRef);
 		}
 
-		const runtime = await BtwSideSessionRuntime.create({
+		const runtime = await JarvisSideSessionRuntime.create({
 			bridge: state.bridge,
 			cwd: ctx.cwd,
 			modelRegistry: ctx.modelRegistry,
-			model: getDesiredBtwModel(state),
-			btwModelModeProvider: () => state.btwModelSelection.mode,
-			thinkingLevel: state.thinkingLevel,
+			model: getDesiredJarvisModel(state),
+			jarvisModelModeProvider: () => state.jarvisModelSelection.mode,
+			thinkingLevel: getDesiredJarvisThinkingLevel(state),
 			sessionFile,
 			systemPromptProvider: () => state.systemPrompt,
 			mainContextProvider: () => state.mainContext,
@@ -488,14 +532,14 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 			sendFollowUpToMain: (message: string) => {
 				pi.sendUserMessage(message, { deliverAs: "followUp" });
 			},
-			// Route the confirmation through the /btw overlay itself via the
+			// Route the confirmation through the /jarvis overlay itself via the
 			// bridge. The main session's UI confirm would otherwise render inside
 			// the base layer (the pi editor container) and sit hidden behind the
-			// /btw overlay, leaving the side-session tool execute hung on a
+			// /jarvis overlay, leaving the side-session tool execute hung on a
 			// promise the user could never answer.
 			confirmSteerToMain: (message: string) =>
 				state.bridge.requestConfirmation(
-					"Send /btw steer to main?",
+					"Send /jarvis steer to main?",
 					`This will steer the main agent with:\n\n${message}`,
 				),
 			sendSteerToMain: (message: string) => {

@@ -21,12 +21,12 @@ type Terminal = {
 	clearScreen(): void;
 	setTitle(title: string): void;
 };
-import { BtwOverlayBridge, BtwOverlayComponent, attachOverlayBridge, cursorMarkerPresent, type BtwOverlayView } from "../overlay.js";
+import { JarvisOverlayBridge, JarvisOverlayComponent, attachOverlayBridge, cursorMarkerPresent, type JarvisOverlayView } from "../overlay.js";
 import { buildMainSessionContext, DEFAULT_MAIN_SESSION_RECENT_LIMIT } from "../main-context.js";
 import { MainSessionTracker } from "../main-session-state.js";
-import { createBtwSessionRef, readBtwSessionRef, BTW_SESSION_REF_CUSTOM_TYPE } from "../session-ref.js";
-import { BtwSideSessionRuntime, createSideSessionFile } from "../side-session.js";
-import btwExtension from "../index.js";
+import { createJarvisSessionRef, readJarvisSessionRef, JARVIS_SESSION_REF_CUSTOM_TYPE } from "../session-ref.js";
+import { JarvisSideSessionRuntime, createSideSessionFile } from "../side-session.js";
+import jarvisExtension from "../index.js";
 
 class FakeTerminal implements Terminal {
 	private inputHandler?: (data: string) => void;
@@ -93,7 +93,7 @@ type TestOverlayViewState = {
 	mainModelLabel: string;
 	modelLabel: string;
 	modelModeLabel: string;
-	displayEntries: ReturnType<BtwOverlayView["getDisplayEntries"]>;
+	displayEntries: ReturnType<JarvisOverlayView["getDisplayEntries"]>;
 	sentMessages: string[];
 	followUpEnabled: boolean;
 	steerEnabled: boolean;
@@ -101,7 +101,7 @@ type TestOverlayViewState = {
 
 function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "sentMessages">> = {}): {
 	state: TestOverlayViewState;
-	view: BtwOverlayView;
+	view: JarvisOverlayView;
 } {
 	const state: TestOverlayViewState = {
 		ready: true,
@@ -110,14 +110,14 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		mainModelLabel: "openai/gpt-5.2",
 		modelLabel: "faux/test-model",
 		modelModeLabel: "follow main",
-		displayEntries: [{ kind: "assistant", text: "hello from /btw" }],
+		displayEntries: [{ kind: "assistant", text: "hello from /jarvis" }],
 		sentMessages: [],
 		followUpEnabled: false,
 		steerEnabled: false,
 		...overrides,
 	};
 
-	const view: BtwOverlayView = {
+	const view: JarvisOverlayView = {
 		isReady: () => state.ready,
 		isStreaming: () => state.streaming,
 		getModelLabel: () => state.modelLabel,
@@ -146,24 +146,24 @@ function flushTicks(): Promise<void> {
 }
 
 async function testSessionRef(): Promise<void> {
-	const ref = createBtwSessionRef("/tmp/btw.jsonl");
-	const loaded = readBtwSessionRef([
+	const ref = createJarvisSessionRef("/tmp/jarvis.jsonl");
+	const loaded = readJarvisSessionRef([
 		{ type: "custom", customType: "other", data: {} },
-		{ type: "custom", customType: BTW_SESSION_REF_CUSTOM_TYPE, data: ref },
+		{ type: "custom", customType: JARVIS_SESSION_REF_CUSTOM_TYPE, data: ref },
 	]);
 	assert.deepEqual(loaded, ref);
-	assert.equal(readBtwSessionRef([]), undefined);
+	assert.equal(readJarvisSessionRef([]), undefined);
 }
 
 async function testOverlayFocusAndEscRouting(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
 	const base = new BaseComponent();
-	const bridge = new BtwOverlayBridge();
+	const bridge = new JarvisOverlayBridge();
 	const { view } = createTestOverlayView();
 	let closed = false;
 
-	const overlay = attachOverlayBridge(new BtwOverlayComponent(tui, theme, bridge, view, () => {
+	const overlay = attachOverlayBridge(new JarvisOverlayComponent(tui, theme, bridge, view, () => {
 		closed = true;
 	}), bridge, tui);
 
@@ -188,9 +188,9 @@ async function testOverlayFocusAndEscRouting(): Promise<void> {
 async function testOverlayRenderDistinctness(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
-	const bridge = new BtwOverlayBridge();
+	const bridge = new JarvisOverlayBridge();
 	const { view } = createTestOverlayView();
-	const overlay = new BtwOverlayComponent(tui, theme, bridge, view, () => {});
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
 	const lines = overlay.render(80);
 	assert.ok(lines.some((line) => line.includes("\x1b[48;2;24;28;36m")), "overlay should render its own shaded background");
 	assert.ok(lines[0]?.includes("╭") && lines.at(-1)?.includes("╰"), "overlay should render a bordered floating window");
@@ -199,15 +199,15 @@ async function testOverlayRenderDistinctness(): Promise<void> {
 async function testOverlayForwardingToggleControls(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
-	const bridge = new BtwOverlayBridge();
+	const bridge = new JarvisOverlayBridge();
 	const { state, view } = createTestOverlayView({ mainStatus: "busy" });
-	const overlay = new BtwOverlayComponent(tui, theme, bridge, view, () => {});
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
 	overlay.focused = true;
 
 	let lines = overlay.render(80);
 	assert.ok(lines.some((line) => line.includes("Main: busy")), "overlay header should show the current main status");
 	assert.ok(lines.some((line) => line.includes("Main model: openai/gpt-5.2")), "overlay header should show the current main model label");
-	assert.ok(lines.some((line) => line.includes("/btw model: faux/test-model (follow main)")), "overlay header should show the active /btw model and mode");
+	assert.ok(lines.some((line) => line.includes("/jarvis model: faux/test-model (follow main)")), "overlay header should show the active /jarvis model and mode");
 	assert.ok(lines.some((line) => line.includes("FollowUp: off")), "overlay header should show the FollowUp toggle state");
 	assert.ok(lines.some((line) => line.includes("Steer: off")), "overlay header should show the Steer toggle state");
 	assert.equal(cursorMarkerPresent(lines), true, "message input should be focused by default");
@@ -242,9 +242,55 @@ async function testOverlayForwardingToggleControls(): Promise<void> {
 	assert.equal(cursorMarkerPresent(lines), true, "tab should wrap focus back to the message input");
 }
 
+async function testJarvisOverlayInputHistoryNavigatesUserMessages(): Promise<void> {
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
+	const bridge = new JarvisOverlayBridge();
+	const { view } = createTestOverlayView({
+		displayEntries: [
+			{ kind: "system", text: "Starting..." },
+			{ kind: "user", text: "first message" },
+			{ kind: "assistant", text: "hi" },
+			{ kind: "user", text: "second message" },
+		],
+	});
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
+	overlay.focused = true;
+
+	overlay.handleInput("D");
+	overlay.handleInput("r");
+	overlay.handleInput("a");
+	overlay.handleInput("f");
+	overlay.handleInput("t");
+	
+	// Up -> second message
+	overlay.handleInput("\x1b[A");
+	assert.equal((overlay as any).input.getValue(), "second message", "Up arrow should load the most recent user message");
+
+	// Up -> first message
+	overlay.handleInput("\x1b[A");
+	assert.equal((overlay as any).input.getValue(), "first message", "Up arrow again should load the older user message");
+
+	// Up -> clamped to first message
+	overlay.handleInput("\x1b[A");
+	assert.equal((overlay as any).input.getValue(), "first message", "Up arrow should clamp at the oldest user message");
+
+	// Down -> second message
+	overlay.handleInput("\x1b[B");
+	assert.equal((overlay as any).input.getValue(), "second message", "Down arrow should navigate forward to the newer user message");
+
+	// Down -> draft restored
+	overlay.handleInput("\x1b[B");
+	assert.equal((overlay as any).input.getValue(), "Draft", "Down arrow at the end should restore the original input draft");
+
+	// Down -> clamped at draft
+	overlay.handleInput("\x1b[B");
+	assert.equal((overlay as any).input.getValue(), "Draft", "Down arrow should clamp at the draft");
+}
+
 async function testSideSessionPersistence(): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
 	const agentDir = join(tempRoot, "agent");
 	const cwd = join(tempRoot, "project");
 	mkdirSync(agentDir, { recursive: true });
@@ -279,8 +325,8 @@ async function testSideSessionPersistence(): Promise<void> {
 
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
-		const bridge = new BtwOverlayBridge();
-		const runtime = await BtwSideSessionRuntime.create({
+		const bridge = new JarvisOverlayBridge();
+		const runtime = await JarvisSideSessionRuntime.create({
 			bridge,
 			cwd,
 			modelRegistry: modelRegistry as any,
@@ -302,8 +348,8 @@ async function testSideSessionPersistence(): Promise<void> {
 			themeProvider: () => theme,
 		});
 		const entries = runtime.getDisplayEntries().map((entry) => entry.text);
-		assert.ok(entries.some((text) => text.includes("restore me")), "user history should be restored from the /btw session file");
-		assert.ok(entries.some((text) => text.includes("restored response")), "assistant history should be restored from the /btw session file");
+		assert.ok(entries.some((text) => text.includes("restore me")), "user history should be restored from the /jarvis session file");
+		assert.ok(entries.some((text) => text.includes("restored response")), "assistant history should be restored from the /jarvis session file");
 		runtime.dispose();
 	} finally {
 		if (originalAgentDir === undefined) {
@@ -317,7 +363,7 @@ async function testSideSessionPersistence(): Promise<void> {
 
 async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
 	const agentDir = join(tempRoot, "agent");
 	const cwd = join(tempRoot, "project");
 	mkdirSync(agentDir, { recursive: true });
@@ -367,9 +413,9 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		};
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
-		const bridge = new BtwOverlayBridge();
+		const bridge = new JarvisOverlayBridge();
 		const sessionFile = await createSideSessionFile(cwd);
-		const runtime = await BtwSideSessionRuntime.create({
+		const runtime = await JarvisSideSessionRuntime.create({
 			bridge,
 			cwd,
 			modelRegistry: modelRegistry as any,
@@ -404,22 +450,22 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 
 		const firstResult = await extensionRunner.emitBeforeAgentStart("check prompt", undefined, "fallback prompt");
 		const firstSystemPrompt = firstResult?.systemPrompt ?? "";
-		assert.ok(firstSystemPrompt.includes(mainSystemPrompt), "/btw should inherit the main session system prompt");
-		assert.ok(firstSystemPrompt.includes("You are running inside /btw."), "/btw addendum should identify the side assistant role");
-		assert.ok(firstSystemPrompt.includes("You have no repo, system, or MCP tools in /btw."), "/btw addendum should remove repo/system/MCP tool authority");
+		assert.ok(firstSystemPrompt.includes(mainSystemPrompt), "/jarvis should inherit the main session system prompt");
+		assert.ok(firstSystemPrompt.includes("You are running inside /jarvis."), "/jarvis addendum should identify the side assistant role");
+		assert.ok(firstSystemPrompt.includes("You have no repo, system, or MCP tools in /jarvis."), "/jarvis addendum should remove repo/system/MCP tool authority");
 		assert.ok(
 			firstSystemPrompt.includes("Communication permissions to the main agent via followUp / steer are controlled separately and may be enabled or disabled."),
-			"/btw addendum should describe separate followUp / steer permissions",
+			"/jarvis addendum should describe separate followUp / steer permissions",
 		);
-		assert.ok(firstSystemPrompt.includes("btw_send_follow_up_to_main"), "/btw prompt should name the followUp bridge tool");
-		assert.ok(firstSystemPrompt.includes("btw_send_steer_to_main"), "/btw prompt should name the steer bridge tool");
+		assert.ok(firstSystemPrompt.includes("jarvis_send_follow_up_to_main"), "/jarvis prompt should name the followUp bridge tool");
+		assert.ok(firstSystemPrompt.includes("jarvis_send_steer_to_main"), "/jarvis prompt should name the steer bridge tool");
 		assert.ok(
 			firstSystemPrompt.includes("It is disabled right now; attempts are blocked."),
-			"/btw prompt should describe disabled bridge permissions",
+			"/jarvis prompt should describe disabled bridge permissions",
 		);
-		assert.ok(!firstSystemPrompt.includes("btw_request_write_access"), "/btw prompt should not reference the removed mutation approval tool");
-		assert.ok(firstSystemPrompt.includes(currentMainContext.summaryText), "/btw prompt should inject the current main-session summary");
-		assert.ok(firstSystemPrompt.includes(currentMainContext.recentText), "/btw prompt should inject the current recent main-session window");
+		assert.ok(!firstSystemPrompt.includes("jarvis_request_write_access"), "/jarvis prompt should not reference the removed mutation approval tool");
+		assert.ok(firstSystemPrompt.includes(currentMainContext.summaryText), "/jarvis prompt should inject the current main-session summary");
+		assert.ok(firstSystemPrompt.includes(currentMainContext.recentText), "/jarvis prompt should inject the current recent main-session window");
 
 		currentMainContext = createMainContext("SECOND_MAIN_REQUEST", "second assistant status", "SECOND_RECENT_WINDOW");
 		communicationPermissions = {
@@ -428,18 +474,18 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		};
 		const secondResult = await extensionRunner.emitBeforeAgentStart("check prompt again", undefined, "fallback prompt");
 		const secondSystemPrompt = secondResult?.systemPrompt ?? "";
-		assert.ok(secondSystemPrompt.includes(currentMainContext.summaryText), "/btw prompt should refresh the injected main-session summary for each turn");
-		assert.ok(secondSystemPrompt.includes(currentMainContext.recentText), "/btw prompt should refresh the injected recent main-session window for each turn");
-		assert.ok(!secondSystemPrompt.includes("FIRST_MAIN_REQUEST"), "/btw should not keep stale startup context in later turns");
-		assert.ok(secondSystemPrompt.includes("SECOND_MAIN_REQUEST"), "/btw should inject the latest main-session request");
-		assert.ok(secondSystemPrompt.includes("SECOND_RECENT_WINDOW"), "/btw should inject the latest recent main-session text");
+		assert.ok(secondSystemPrompt.includes(currentMainContext.summaryText), "/jarvis prompt should refresh the injected main-session summary for each turn");
+		assert.ok(secondSystemPrompt.includes(currentMainContext.recentText), "/jarvis prompt should refresh the injected recent main-session window for each turn");
+		assert.ok(!secondSystemPrompt.includes("FIRST_MAIN_REQUEST"), "/jarvis should not keep stale startup context in later turns");
+		assert.ok(secondSystemPrompt.includes("SECOND_MAIN_REQUEST"), "/jarvis should inject the latest main-session request");
+		assert.ok(secondSystemPrompt.includes("SECOND_RECENT_WINDOW"), "/jarvis should inject the latest recent main-session text");
 		assert.ok(
 			secondSystemPrompt.includes("It is enabled right now."),
-			"/btw prompt should reflect enabled followUp forwarding",
+			"/jarvis prompt should reflect enabled followUp forwarding",
 		);
 		assert.ok(
 			secondSystemPrompt.includes("It is enabled right now, but every actual send still requires explicit user confirmation."),
-			"/btw prompt should reflect enabled steer forwarding with confirmation gating",
+			"/jarvis prompt should reflect enabled steer forwarding with confirmation gating",
 		);
 
 		runtime.dispose();
@@ -507,7 +553,7 @@ async function testBuildMainSessionContext(): Promise<void> {
 			timestamp: "2026-01-01T00:00:03.000Z",
 			message: {
 				role: "user",
-				content: [{ type: "text", text: "Need the latest /btw context." }],
+				content: [{ type: "text", text: "Need the latest /jarvis context." }],
 				timestamp: 2,
 			},
 		},
@@ -549,7 +595,7 @@ async function testBuildMainSessionContext(): Promise<void> {
 			id: "custom-hidden",
 			parentId: "tool-result-4",
 			timestamp: "2026-01-01T00:00:06.000Z",
-			customType: "btw.hidden",
+			customType: "jarvis.hidden",
 			content: "hidden internal status",
 			display: false,
 		},
@@ -558,7 +604,7 @@ async function testBuildMainSessionContext(): Promise<void> {
 			id: "custom-visible",
 			parentId: "custom-hidden",
 			timestamp: "2026-01-01T00:00:07.000Z",
-			customType: "btw.visible",
+			customType: "jarvis.visible",
 			content: "Forward this summary later",
 			display: true,
 		},
@@ -584,7 +630,7 @@ async function testBuildMainSessionContext(): Promise<void> {
 			timestamp: "2026-01-01T00:00:09.000Z",
 			message: {
 				role: "user",
-				content: [{ type: "text", text: "Investigate the /btw context window" }],
+				content: [{ type: "text", text: "Investigate the /jarvis context window" }],
 				timestamp: 6,
 			},
 		},
@@ -625,7 +671,7 @@ async function testBuildMainSessionContext(): Promise<void> {
 				{ toolName: "mcp", args: { search: "main context" } },
 			],
 		},
-		latestUserRequest: "Investigate the /btw context window",
+		latestUserRequest: "Investigate the /jarvis context window",
 		latestAssistantText: "Summarizing the main session state.",
 		systemPrompt: "main system prompt",
 		contextUsage: {
@@ -642,7 +688,7 @@ async function testBuildMainSessionContext(): Promise<void> {
 	assert.equal(context.summary.mainModelLabel, "openai/gpt-5.2");
 	assert.equal(context.summary.currentToolActivity.active, true);
 	assert.equal(context.summary.currentToolActivity.running.length, 2);
-	assert.equal(context.summary.latestUserRequest, "Investigate the /btw context window");
+	assert.equal(context.summary.latestUserRequest, "Investigate the /jarvis context window");
 	assert.equal(context.summary.latestAssistantText, "Summarizing the main session state.");
 	assert.equal(context.summary.pendingMessages, true);
 	assert.equal(context.summary.contextUsage?.tokens, 2048);
@@ -661,9 +707,9 @@ async function testBuildMainSessionContext(): Promise<void> {
 async function testOverlayInputSwallowedOnToggleFocus(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
-	const bridge = new BtwOverlayBridge();
+	const bridge = new JarvisOverlayBridge();
 	const { state, view } = createTestOverlayView();
-	const overlay = new BtwOverlayComponent(tui, theme, bridge, view, () => {});
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
 	overlay.focused = true;
 
 	overlay.handleInput("\t");
@@ -840,7 +886,7 @@ async function testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText(): Promis
 	const snapshot = tracker.snapshot();
 	const context = buildMainSessionContext(snapshot);
 	assert.equal(snapshot.latestAssistantText, undefined, "the latest assistant summary field must clear when the latest assistant turn is tool-only");
-	assert.equal(context.summary.latestAssistantText, undefined, "the /btw main-session summary must not reuse older assistant text for a tool-only latest turn");
+	assert.equal(context.summary.latestAssistantText, undefined, "the /jarvis main-session summary must not reuse older assistant text for a tool-only latest turn");
 	assert.ok(context.summaryText.includes("Latest assistant text: none"), "the formatted main-session summary should report no assistant text for a tool-only latest turn");
 	assert.ok(context.recentText.includes('read {"path":"index.ts"}'), "the recent main-session window should still include the current tool activity");
 }
@@ -882,10 +928,10 @@ async function withSideSessionRuntime(
 		confirmSteerToMain?: (message: string) => Promise<boolean>;
 		sendSteerToMain?: (message: string) => void;
 	},
-	run: (runtime: BtwSideSessionRuntime, probe: SideRuntimeToolProbe) => Promise<void>,
+	run: (runtime: JarvisSideSessionRuntime, probe: SideRuntimeToolProbe) => Promise<void>,
 ): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
 	const agentDir = join(tempRoot, "agent");
 	const cwd = join(tempRoot, "project");
 	mkdirSync(agentDir, { recursive: true });
@@ -895,10 +941,10 @@ async function withSideSessionRuntime(
 	try {
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
-		const bridge = new BtwOverlayBridge();
+		const bridge = new JarvisOverlayBridge();
 		const sessionFile = await createSideSessionFile(cwd);
 		let permissions = overrides.communicationPermissions ?? { allowFollowUpToMain: false, allowSteerToMain: false };
-		const runtime = await BtwSideSessionRuntime.create({
+		const runtime = await JarvisSideSessionRuntime.create({
 			bridge,
 			cwd,
 			modelRegistry: modelRegistry as any,
@@ -1007,10 +1053,13 @@ class FakeExtensionAPI {
 	}
 }
 
-class FakeBtwRuntime {
+class FakeJarvisRuntime {
 	syncModelCalls: Array<{ model: TestModel | undefined; thinkingLevel: string | undefined }> = [];
 
-	constructor(public currentModel: TestModel | undefined) {}
+	constructor(
+		public currentModel: TestModel | undefined,
+		public initialThinkingLevel: string | undefined,
+	) {}
 
 	isReady(): boolean {
 		return true;
@@ -1024,7 +1073,7 @@ class FakeBtwRuntime {
 		return this.currentModel ? `${this.currentModel.provider}/${this.currentModel.id}` : "model unavailable";
 	}
 
-	getDisplayEntries(): ReturnType<BtwOverlayView["getDisplayEntries"]> {
+	getDisplayEntries(): ReturnType<JarvisOverlayView["getDisplayEntries"]> {
 		return [];
 	}
 
@@ -1038,13 +1087,13 @@ class FakeBtwRuntime {
 	dispose(): void {}
 }
 
-type BtwExtensionHarness = {
+type JarvisExtensionHarness = {
 	api: FakeExtensionAPI;
 	ctx: TestExtensionCommandContext;
 	mainModel: TestModel;
 	pinnedModel: TestModel;
 	nextMainModel: TestModel;
-	getRuntime(): FakeBtwRuntime | undefined;
+	getRuntime(): FakeJarvisRuntime | undefined;
 };
 
 function createTestExtensionCommandContext(
@@ -1093,9 +1142,9 @@ async function waitForAsyncWork(): Promise<void> {
 	await flushTicks();
 }
 
-async function withBtwExtensionHarness(run: (harness: BtwExtensionHarness) => Promise<void>): Promise<void> {
+async function withJarvisExtensionHarness(run: (harness: JarvisExtensionHarness) => Promise<void>): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
 	const agentDir = join(tempRoot, "agent");
 	const cwd = join(tempRoot, "project");
 	mkdirSync(agentDir, { recursive: true });
@@ -1138,6 +1187,31 @@ async function withBtwExtensionHarness(run: (harness: BtwExtensionHarness) => Pr
 			},
 		],
 	});
+	modelRegistry.registerProvider("xai", {
+		api: "openai",
+		baseUrl: "https://api.x.ai/v1",
+		apiKey: "xai-key",
+		models: [
+			{
+				id: "grok-incompatible-multi-agent",
+				name: "Grok Incompatible Multi Agent",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			},
+			{
+				id: "grok-standard",
+				name: "Grok Standard",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			},
+		],
+	});
 
 	const mainModel = modelRegistry.find("test-provider", "main-alpha");
 	const pinnedModel = modelRegistry.find("test-provider", "side-beta");
@@ -1148,17 +1222,17 @@ async function withBtwExtensionHarness(run: (harness: BtwExtensionHarness) => Pr
 
 	const api = new FakeExtensionAPI();
 	const ctx = createTestExtensionCommandContext(cwd, modelRegistry, mainModel);
-	let runtime: FakeBtwRuntime | undefined;
+	let runtime: FakeJarvisRuntime | undefined;
 
-	const originalCreate = BtwSideSessionRuntime.create;
-	const replacement: typeof BtwSideSessionRuntime.create = async (options) => {
-		runtime = new FakeBtwRuntime(options.model as TestModel | undefined);
-		return runtime as unknown as BtwSideSessionRuntime;
+	const originalCreate = JarvisSideSessionRuntime.create;
+	const replacement: typeof JarvisSideSessionRuntime.create = async (options) => {
+		runtime = new FakeJarvisRuntime(options.model as TestModel | undefined, options.thinkingLevel);
+		return runtime as unknown as JarvisSideSessionRuntime;
 	};
-	(BtwSideSessionRuntime as { create: typeof BtwSideSessionRuntime.create }).create = replacement;
+	(JarvisSideSessionRuntime as { create: typeof JarvisSideSessionRuntime.create }).create = replacement;
 
 	try {
-		btwExtension(api as unknown as Parameters<typeof btwExtension>[0]);
+		jarvisExtension(api as unknown as Parameters<typeof jarvisExtension>[0]);
 		await api.emit("session_start", {}, ctx);
 		await run({
 			api,
@@ -1169,7 +1243,7 @@ async function withBtwExtensionHarness(run: (harness: BtwExtensionHarness) => Pr
 			getRuntime: () => runtime,
 		});
 	} finally {
-		(BtwSideSessionRuntime as { create: typeof BtwSideSessionRuntime.create }).create = originalCreate;
+		(JarvisSideSessionRuntime as { create: typeof JarvisSideSessionRuntime.create }).create = originalCreate;
 		if (originalAgentDir === undefined) {
 			delete process.env.PI_CODING_AGENT_DIR;
 		} else {
@@ -1179,18 +1253,18 @@ async function withBtwExtensionHarness(run: (harness: BtwExtensionHarness) => Pr
 	}
 }
 
-async function openBtwRuntime(harness: BtwExtensionHarness): Promise<FakeBtwRuntime> {
-	await harness.api.runCommand("btw", "", harness.ctx);
+async function openJarvisRuntime(harness: JarvisExtensionHarness): Promise<FakeJarvisRuntime> {
+	await harness.api.runCommand("jarvis", "", harness.ctx);
 	await waitForAsyncWork();
 	const runtime = harness.getRuntime();
-	assert.ok(runtime, "/btw should boot a side-session runtime");
+	assert.ok(runtime, "/jarvis should boot a side-session runtime");
 	return runtime;
 }
 
-async function testBtwModelDefaultFollowMainBehavior(): Promise<void> {
-	await withBtwExtensionHarness(async (harness) => {
-		const runtime = await openBtwRuntime(harness);
-		assert.equal(runtime.currentModel?.id, harness.mainModel.id, "/btw should start on the current main model by default");
+async function testJarvisModelDefaultFollowMainBehavior(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.currentModel?.id, harness.mainModel.id, "/jarvis should start on the current main model by default");
 
 		harness.ctx.model = harness.nextMainModel;
 		await harness.api.emit("model_select", { model: harness.nextMainModel }, harness.ctx);
@@ -1198,97 +1272,156 @@ async function testBtwModelDefaultFollowMainBehavior(): Promise<void> {
 		assert.equal(
 			runtime.currentModel?.id,
 			harness.nextMainModel.id,
-			"/btw should continue following main model_select events until explicitly pinned",
+			"/jarvis should continue following main model_select events until explicitly pinned",
 		);
 		assert.deepEqual(
 			runtime.syncModelCalls.map((call) => call.model?.id),
 			[harness.nextMainModel.id],
-			"default follow-main mode should sync the /btw runtime when the main model changes",
+			"default follow-main mode should sync the /jarvis runtime when the main model changes",
 		);
 	});
 }
 
-async function testBtwModelOpensModelMenuWhenNoArgs(): Promise<void> {
-	await withBtwExtensionHarness(async (harness) => {
+async function testXaiFollowMainForcesThinkingOff(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const runtime = await openJarvisRuntime(harness);
+		const xaiModel = harness.ctx.modelRegistry.find("xai", "grok-standard");
+		assert.ok(xaiModel, "expected the harness xai model to exist");
+
+		harness.ctx.model = xaiModel;
+		await harness.api.emit("model_select", { model: xaiModel }, harness.ctx);
+
+		assert.deepEqual(
+			runtime.syncModelCalls.at(-1),
+			{ model: xaiModel, thinkingLevel: "off" },
+			"xAI models should force /jarvis thinking off even in follow-main mode",
+		);
+	});
+}
+
+async function testJarvisModelOpensModelMenuWhenNoArgs(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
 		(harness.ctx.ui as any).custom = async () => harness.pinnedModel;
-		await harness.api.runCommand("btw-model", "", harness.ctx);
+		await harness.api.runCommand("jarvis-model", "", harness.ctx);
 
-		const runtime = await openBtwRuntime(harness);
+		const runtime = await openJarvisRuntime(harness);
 		assert.equal(
 			runtime.currentModel?.id,
 			harness.pinnedModel.id,
-			"the /btw model selected from the menu should be used when the side runtime starts later",
+			"the /jarvis model selected from the menu should be used when the side runtime starts later",
 		);
 		assert.ok(
 			harness.ctx.notifications.some((notification) =>
-				notification.message.includes(`Pinned /btw to ${harness.pinnedModel.provider}/${harness.pinnedModel.id}`),
+				notification.message.includes(`Pinned /jarvis to ${harness.pinnedModel.provider}/${harness.pinnedModel.id}`),
 			),
-			"/btw-model menu selection should report the pinned /btw model",
+			"/jarvis-model menu selection should report the pinned /jarvis model",
 		);
 		assert.equal(
 			harness.ctx.model?.id,
 			harness.mainModel.id,
-			"/btw-model menu selection must not mutate the main session model state",
+			"/jarvis-model menu selection must not mutate the main session model state",
 		);
 	});
 }
 
-async function testBtwModelOverrideAndStateSeparation(): Promise<void> {
-	await withBtwExtensionHarness(async (harness) => {
-		await harness.api.runCommand("btw-model", "side-beta", harness.ctx);
+async function testJarvisModelOverrideAndStateSeparation(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		await harness.api.runCommand("jarvis-model", "side-beta", harness.ctx);
 		assert.equal(
 			harness.ctx.model?.id,
 			harness.mainModel.id,
-			"/btw-model must not mutate the main session model state",
+			"/jarvis-model must not mutate the main session model state",
 		);
 
-		const runtime = await openBtwRuntime(harness);
+		const runtime = await openJarvisRuntime(harness);
 		assert.equal(
 			runtime.currentModel?.id,
 			harness.pinnedModel.id,
-			"a pinned /btw model should be used when the side runtime starts later",
+			"a pinned /jarvis model should be used when the side runtime starts later",
 		);
 		assert.ok(
 			harness.ctx.notifications.some((notification) =>
-				notification.message.includes(`Pinned /btw to ${harness.pinnedModel.provider}/${harness.pinnedModel.id}`),
+				notification.message.includes(`Pinned /jarvis to ${harness.pinnedModel.provider}/${harness.pinnedModel.id}`),
 			),
-			"/btw-model should report the pinned /btw model without changing the main model",
+			"/jarvis-model should report the pinned /jarvis model without changing the main model",
 		);
 	});
 }
 
-async function testPinnedBtwModelNotClobberedByMainModelSelect(): Promise<void> {
-	await withBtwExtensionHarness(async (harness) => {
-		await harness.api.runCommand("btw-model", "side-beta", harness.ctx);
-		const runtime = await openBtwRuntime(harness);
-		assert.equal(runtime.syncModelCalls.length, 0, "pinning before /btw starts should not require a live runtime sync");
+async function testPinnedJarvisModelNotClobberedByMainModelSelect(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		await harness.api.runCommand("jarvis-model", "side-beta", harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.syncModelCalls.length, 0, "pinning before /jarvis starts should not require a live runtime sync");
 
 		harness.ctx.model = harness.nextMainModel;
 		await harness.api.emit("model_select", { model: harness.nextMainModel }, harness.ctx);
-
 		assert.equal(
 			runtime.currentModel?.id,
 			harness.pinnedModel.id,
-			"main model_select must not clobber a pinned /btw model",
+			"main model_select must not clobber a pinned /jarvis model",
 		);
-		assert.equal(runtime.syncModelCalls.length, 0, "no /btw runtime sync should happen while the /btw model is pinned");
+		assert.equal(runtime.syncModelCalls.length, 0, "no /jarvis runtime sync should happen while the /jarvis model is pinned");
 	});
 }
 
-async function testBtwModelReturnToFollowMainBehavior(): Promise<void> {
-	await withBtwExtensionHarness(async (harness) => {
-		await harness.api.runCommand("btw-model", "side-beta", harness.ctx);
-		const runtime = await openBtwRuntime(harness);
+async function testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const runtime = await openJarvisRuntime(harness);
+		await harness.api.runCommand("jarvis-model", "side-beta", harness.ctx);
+		assert.deepEqual(
+			runtime.syncModelCalls.at(-1),
+			{ model: harness.pinnedModel, thinkingLevel: "off" },
+			"pinning a /jarvis model while the runtime is live should reset its local thinking level to off",
+		);
+	});
+}
+
+async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		let capturedComponent: any;
+		const originalCustom = harness.ctx.ui.custom;
+		(harness.ctx.ui as any).custom = async (fn: any, opts: any) => {
+			capturedComponent = fn({ requestRender: () => {}, terminal: { rows: 40 } }, harness.ctx.ui.theme, {}, () => {});
+			return originalCustom.call(harness.ctx.ui, fn, opts);
+		};
+
+		await harness.api.runCommand("jarvis", "", harness.ctx);
+		await waitForAsyncWork();
+
+		assert.ok(capturedComponent, "should capture overlay component");
+		
+		// It's a JarvisOverlayComponent. Its `view` property is private, but we can call handleInput to toggle FollowUp
+		// The default focus is "input".
+		capturedComponent.handleInput("\t"); // focus FollowUp
+		capturedComponent.handleInput(" ");  // toggle it ON
+		
+		// Now switch model to incompatible
+		harness.ctx.model = harness.ctx.modelRegistry.find("xai", "grok-incompatible-multi-agent");
+		await harness.api.emit("model_select", { model: harness.ctx.model }, harness.ctx);
+
+		const lines = capturedComponent.render(80) as string[];
+		assert.ok(
+			lines.some((line) => line.includes("Relay disabled:")),
+			"/jarvis should notify when an incompatible main model disables the bridge tools",
+		);
+	});
+}
+
+async function testJarvisModelReturnToFollowMainBehavior(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		await harness.api.runCommand("jarvis-model", "side-beta", harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
 
 		harness.ctx.model = harness.nextMainModel;
 		await harness.api.emit("model_select", { model: harness.nextMainModel }, harness.ctx);
-		assert.equal(runtime.currentModel?.id, harness.pinnedModel.id, "the pinned /btw model should remain active before follow-main is restored");
+		assert.equal(runtime.currentModel?.id, harness.pinnedModel.id, "the pinned /jarvis model should remain active before follow-main is restored");
 
-		await harness.api.runCommand("btw-model", "follow-main", harness.ctx);
+		await harness.api.runCommand("jarvis-model", "follow-main", harness.ctx);
 		assert.equal(
 			runtime.currentModel?.id,
 			harness.nextMainModel.id,
-			"follow-main should immediately resync /btw to the current main model",
+			"follow-main should immediately resync /jarvis to the current main model",
 		);
 
 		harness.ctx.model = harness.mainModel;
@@ -1296,7 +1429,7 @@ async function testBtwModelReturnToFollowMainBehavior(): Promise<void> {
 		assert.equal(
 			runtime.currentModel?.id,
 			harness.mainModel.id,
-			"after follow-main is restored, later main model changes should sync /btw again",
+			"after follow-main is restored, later main model changes should sync /jarvis again",
 		);
 		assert.deepEqual(
 			runtime.syncModelCalls.map((call) => call.model?.id),
@@ -1305,31 +1438,45 @@ async function testBtwModelReturnToFollowMainBehavior(): Promise<void> {
 		);
 	});
 }
-
 async function testSideSessionToolWhitelist(): Promise<void> {
 	await withSideSessionRuntime({}, async (_runtime, probe) => {
 		assert.ok(probe.session, "side session runtime should expose the underlying session");
-		const activeToolNames = probe.session!.getActiveToolNames().slice().sort();
+		const activeToolNames: string[] = probe.session!.getActiveToolNames().slice().sort();
 		assert.deepEqual(
 			activeToolNames,
-			["btw_send_follow_up_to_main", "btw_send_steer_to_main"],
-			"/btw side session must expose only the followUp and steer bridge tools to the LLM (no repo, system, or MCP tools)",
+			[],
+			"/jarvis should not expose followUp/steer bridge tools to the LLM while forwarding permissions are OFF",
 		);
-		for (const forbidden of ["read", "write", "edit", "bash", "grep", "find", "ls"]) {
+		const forbiddenTools: string[] = ["read", "write", "edit", "bash", "grep", "find", "ls"];
+		for (const forbidden of forbiddenTools) {
 			assert.ok(
-				!activeToolNames.includes(forbidden),
-				`/btw side session must not expose the built-in ${forbidden} tool to the LLM`,
+				!activeToolNames.some((toolName) => toolName === forbidden),
+				`/jarvis side session must not expose the built-in ${forbidden} tool to the LLM`,
 			);
 		}
 	});
 }
 
+async function testSideSessionBridgeToolsActivateWhenPermitted(): Promise<void> {
+	await withSideSessionRuntime(
+		{ communicationPermissions: { allowFollowUpToMain: true, allowSteerToMain: true } },
+		async (_runtime, probe) => {
+			assert.ok(probe.session, "side session runtime should expose the underlying session");
+			const activeToolNames: string[] = probe.session!.getActiveToolNames().slice().sort();
+			assert.deepEqual(
+				activeToolNames,
+				["jarvis_send_follow_up_to_main", "jarvis_send_steer_to_main"],
+				"/jarvis should expose the bridge tools only when forwarding permissions are enabled",
+			);
+		},
+	);
+}
+
 async function testFollowUpToolPermissionGating(): Promise<void> {
 	let permissionsState = { allowFollowUpToMain: false, allowSteerToMain: false };
 	let sentFollowUp: string | undefined;
-
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
 	const agentDir = join(tempRoot, "agent");
 	const cwd = join(tempRoot, "project");
 	mkdirSync(agentDir, { recursive: true });
@@ -1339,9 +1486,9 @@ async function testFollowUpToolPermissionGating(): Promise<void> {
 	try {
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
-		const bridge = new BtwOverlayBridge();
+		const bridge = new JarvisOverlayBridge();
 		const sessionFile = await createSideSessionFile(cwd);
-		const runtime = await BtwSideSessionRuntime.create({
+		const runtime = await JarvisSideSessionRuntime.create({
 			bridge,
 			cwd,
 			modelRegistry: modelRegistry as any,
@@ -1365,7 +1512,7 @@ async function testFollowUpToolPermissionGating(): Promise<void> {
 		try {
 			const probe = runtime as unknown as SideRuntimeToolProbe;
 			assert.ok(probe.session, "side session runtime should expose the underlying session");
-			const followUp = probe.session!.getToolDefinition("btw_send_follow_up_to_main");
+			const followUp = probe.session!.getToolDefinition("jarvis_send_follow_up_to_main");
 			assert.ok(followUp, "followUp bridge tool should be registered on the side session");
 
 			const blockedByPermission = await followUp!.execute("call-1", { message: "please poke main" }, undefined, undefined, undefined);
@@ -1400,7 +1547,7 @@ async function testSteerToolPermissionAndConfirmGating(): Promise<void> {
 	let sentSteer: string | undefined;
 
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
 	const agentDir = join(tempRoot, "agent");
 	const cwd = join(tempRoot, "project");
 	mkdirSync(agentDir, { recursive: true });
@@ -1410,9 +1557,9 @@ async function testSteerToolPermissionAndConfirmGating(): Promise<void> {
 	try {
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
-		const bridge = new BtwOverlayBridge();
+		const bridge = new JarvisOverlayBridge();
 		const sessionFile = await createSideSessionFile(cwd);
-		const runtime = await BtwSideSessionRuntime.create({
+		const runtime = await JarvisSideSessionRuntime.create({
 			bridge,
 			cwd,
 			modelRegistry: modelRegistry as any,
@@ -1439,7 +1586,7 @@ async function testSteerToolPermissionAndConfirmGating(): Promise<void> {
 		try {
 			const probe = runtime as unknown as SideRuntimeToolProbe;
 			assert.ok(probe.session, "side session runtime should expose the underlying session");
-			const steer = probe.session!.getToolDefinition("btw_send_steer_to_main");
+			const steer = probe.session!.getToolDefinition("jarvis_send_steer_to_main");
 			assert.ok(steer, "steer bridge tool should be registered on the side session");
 
 			const blockedByPermission = await steer!.execute("call-1", { message: "steer main" }, undefined, undefined, undefined);
@@ -1478,7 +1625,7 @@ async function testSteerToolPermissionAndConfirmGating(): Promise<void> {
 }
 
 async function testBridgeConfirmationPrimitive(): Promise<void> {
-	const bridge = new BtwOverlayBridge();
+	const bridge = new JarvisOverlayBridge();
 	assert.equal(bridge.hasPendingConfirmation(), false);
 	assert.equal(bridge.getPendingConfirmation(), undefined);
 
@@ -1505,7 +1652,7 @@ async function testBridgeConfirmationPrimitive(): Promise<void> {
 	assert.ok(renderCount > 0, "resolveConfirmation must request a render when attached");
 
 	// Detaching the bridge must not cancel a pending confirmation; the user can
-	// re-open /btw and answer it later.
+	// re-open /jarvis and answer it later.
 	const survivesDetach = bridge.requestConfirmation("t2", "m2");
 	bridge.detach();
 	assert.equal(bridge.hasPendingConfirmation(), true, "detach must not cancel pending confirmation");
@@ -1537,10 +1684,10 @@ async function testBridgeConfirmationPrimitive(): Promise<void> {
 async function testOverlayConfirmationRenderingAndKeys(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
-	const bridge = new BtwOverlayBridge();
+	const bridge = new JarvisOverlayBridge();
 	const { state, view } = createTestOverlayView();
 	let closed = false;
-	const overlay = new BtwOverlayComponent(tui, theme, bridge, view, () => {
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {
 		closed = true;
 	});
 	overlay.focused = true;
@@ -1550,12 +1697,12 @@ async function testOverlayConfirmationRenderingAndKeys(): Promise<void> {
 	assert.equal(cursorMarkerPresent(lines), true, "input cursor should be visible before any confirmation");
 
 	const confirmPromise = bridge.requestConfirmation(
-		"Send /btw steer to main?",
+		"Send /jarvis steer to main?",
 		"This will steer the main agent with:\n\nfocus on edge cases",
 	);
 	lines = overlay.render(80);
 	assert.ok(
-		lines.some((line) => line.includes("Send /btw steer to main?")),
+		lines.some((line) => line.includes("Send /jarvis steer to main?")),
 		"overlay should render the confirmation title inside the floating overlay",
 	);
 	assert.ok(
@@ -1613,7 +1760,7 @@ async function testOverlayConfirmationRenderingAndKeys(): Promise<void> {
 
 async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-btw-test-"));
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
 	const agentDir = join(tempRoot, "agent");
 	const cwd = join(tempRoot, "project");
 	mkdirSync(agentDir, { recursive: true });
@@ -1623,12 +1770,12 @@ async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 	try {
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
-		const bridge = new BtwOverlayBridge();
+		const bridge = new JarvisOverlayBridge();
 		bridge.attach(() => {});
 		const sessionFile = await createSideSessionFile(cwd);
 		const permissionsState = { allowFollowUpToMain: false, allowSteerToMain: true };
 		let sentSteer: string | undefined;
-		const runtime = await BtwSideSessionRuntime.create({
+		const runtime = await JarvisSideSessionRuntime.create({
 			bridge,
 			cwd,
 			modelRegistry: modelRegistry as any,
@@ -1644,7 +1791,7 @@ async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 			sendFollowUpToMain: () => {},
 			confirmSteerToMain: (message: string) =>
 				bridge.requestConfirmation(
-					"Send /btw steer to main?",
+					"Send /jarvis steer to main?",
 					`This will steer the main agent with:\n\n${message}`,
 				),
 			sendSteerToMain: (message) => {
@@ -1656,7 +1803,7 @@ async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 		try {
 			const probe = runtime as unknown as SideRuntimeToolProbe;
 			assert.ok(probe.session, "side session runtime should expose the underlying session");
-			const steer = probe.session!.getToolDefinition("btw_send_steer_to_main");
+			const steer = probe.session!.getToolDefinition("jarvis_send_steer_to_main");
 			assert.ok(steer, "steer bridge tool should be registered on the side session");
 
 			// ACCEPT path: execute blocks on bridge confirmation, user answers Yes.
@@ -1666,7 +1813,7 @@ async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 			assert.deepEqual(
 				bridge.getPendingConfirmation(),
 				{
-					title: "Send /btw steer to main?",
+					title: "Send /jarvis steer to main?",
 					message: "This will steer the main agent with:\n\nfocus on errors",
 				},
 				"bridge confirmation must carry the steer title and message body",
@@ -1751,25 +1898,30 @@ async function main(): Promise<void> {
 	await testOverlayRenderDistinctness();
 	await testOverlayForwardingToggleControls();
 	await testOverlayInputSwallowedOnToggleFocus();
+	await testJarvisOverlayInputHistoryNavigatesUserMessages();
 	await testBridgeConfirmationPrimitive();
 	await testOverlayConfirmationRenderingAndKeys();
 	await testHandleMessageStartMarksAssistantStreaming();
 	await testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText();
 	await testMainSessionTrackerToolExecutionKeying();
-	await testBtwModelDefaultFollowMainBehavior();
-	await testBtwModelOpensModelMenuWhenNoArgs();
-	await testBtwModelOverrideAndStateSeparation();
-	await testPinnedBtwModelNotClobberedByMainModelSelect();
-	await testBtwModelReturnToFollowMainBehavior();
+	await testJarvisModelDefaultFollowMainBehavior();
+	await testXaiFollowMainForcesThinkingOff();
+	await testJarvisModelOpensModelMenuWhenNoArgs();
+	await testJarvisModelOverrideAndStateSeparation();
+	await testPinnedJarvisModelNotClobberedByMainModelSelect();
+	await testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime();
+	await testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning();
+	await testJarvisModelReturnToFollowMainBehavior();
 	await testSideSessionPersistence();
 	await testSideSessionUsesMainSystemPrompt();
 	await testSideSessionToolWhitelist();
+	await testSideSessionBridgeToolsActivateWhenPermitted();
 	await testFollowUpToolPermissionGating();
 	await testSteerToolPermissionAndConfirmGating();
 	await testSteerConfirmationRoutedThroughBridge();
 	await testBuildMainSessionContext();
 	await testPackageManifestDeclaresPiPeerDependencies();
-	console.log("btw tests passed");
+	console.log("jarvis tests passed");
 }
 
 main().catch((error) => {

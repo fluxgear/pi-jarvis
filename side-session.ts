@@ -11,14 +11,14 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import { BtwOverlayBridge, type BtwDisplayEntry } from "./overlay.js";
+import { JarvisOverlayBridge, type JarvisDisplayEntry } from "./overlay.js";
 
 const SIDE_SYSTEM_PROMPT = `
-Authoritative /btw addendum:
-- You are running inside /btw.
+Authoritative /jarvis addendum:
+- You are running inside /jarvis.
 - The main Pi agent continues independently while you assist from the side.
-- You have no repo, system, or MCP tools in /btw.
-- Before each /btw turn you will be given a deterministic summary and bounded recent view of the main session.
+- You have no repo, system, or MCP tools in /jarvis.
+- Before each /jarvis turn you will be given a deterministic summary and bounded recent view of the main session.
 - Communication permissions to the main agent via followUp / steer are controlled separately and may be enabled or disabled.
 - Use the injected main-session context to answer what is happening right now.
 `.trim();
@@ -26,11 +26,11 @@ Authoritative /btw addendum:
 type SideSessionHandle = Awaited<ReturnType<typeof createAgentSession>>["session"];
 
 type SideRuntimeCreateOptions = {
-	bridge: BtwOverlayBridge;
+	bridge: JarvisOverlayBridge;
 	cwd: string;
 	modelRegistry: ExtensionContext["modelRegistry"];
 	model: Model<any> | undefined;
-	btwModelModeProvider?: () => "follow-main" | "pinned";
+	jarvisModelModeProvider?: () => "follow-main" | "pinned";
 	thinkingLevel: string | undefined;
 	sessionFile: string;
 	systemPromptProvider: () => string;
@@ -48,28 +48,28 @@ type SideRuntimeCreateOptions = {
 	themeProvider: () => ExtensionContext["ui"]["theme"];
 };
 
-export function getBtwSessionDirectory(cwd: string, agentDir: string = getAgentDir()): string {
+export function getJarvisSessionDirectory(cwd: string, agentDir: string = getAgentDir()): string {
 	const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-	const sessionDir = join(agentDir, "btw-sessions", safePath);
+	const sessionDir = join(agentDir, "jarvis-sessions", safePath);
 	mkdirSync(sessionDir, { recursive: true });
 	return sessionDir;
 }
 
 export async function createSideSessionFile(cwd: string): Promise<string> {
-	const sessionManager = SessionManager.create(cwd, getBtwSessionDirectory(cwd));
+	const sessionManager = SessionManager.create(cwd, getJarvisSessionDirectory(cwd));
 	const file = sessionManager.getSessionFile();
 	if (!file) {
-		throw new Error("Failed to create /btw session file.");
+		throw new Error("Failed to create /jarvis session file.");
 	}
 	return file;
 }
 
-export class BtwSideSessionRuntime {
-	readonly bridge: BtwOverlayBridge;
+export class JarvisSideSessionRuntime {
+	readonly bridge: JarvisOverlayBridge;
 
 	private session?: SideSessionHandle;
 	private unsubscribe?: () => void;
-	private historyEntries: BtwDisplayEntry[] = [];
+	private historyEntries: JarvisDisplayEntry[] = [];
 	private streamingAssistant?: AssistantMessage;
 	private pendingToolCalls = new Map<string, string>();
 	private bootError?: string;
@@ -77,14 +77,14 @@ export class BtwSideSessionRuntime {
 	private modelLabel = "model unavailable";
 
 	private constructor(
-		bridge: BtwOverlayBridge,
+		bridge: JarvisOverlayBridge,
 		private readonly themeProvider: SideRuntimeCreateOptions["themeProvider"],
 	) {
 		this.bridge = bridge;
 	}
 
-	static async create(options: SideRuntimeCreateOptions): Promise<BtwSideSessionRuntime> {
-		const runtime = new BtwSideSessionRuntime(options.bridge, options.themeProvider);
+	static async create(options: SideRuntimeCreateOptions): Promise<JarvisSideSessionRuntime> {
+		const runtime = new JarvisSideSessionRuntime(options.bridge, options.themeProvider);
 		await runtime.initialize(options);
 		return runtime;
 	}
@@ -101,7 +101,7 @@ export class BtwSideSessionRuntime {
 		return this.modelLabel;
 	}
 
-	getDisplayEntries(): BtwDisplayEntry[] {
+	getDisplayEntries(): JarvisDisplayEntry[] {
 		const entries = [...this.historyEntries];
 
 		for (const text of this.pendingToolCalls.values()) {
@@ -128,7 +128,7 @@ export class BtwSideSessionRuntime {
 
 	async sendMessage(text: string): Promise<void> {
 		if (!this.session) {
-			throw new Error("/btw session is not ready.");
+			throw new Error("/jarvis session is not ready.");
 		}
 		if (this.session.isStreaming) {
 			await this.session.prompt(text, { streamingBehavior: "steer" });
@@ -180,7 +180,7 @@ export class BtwSideSessionRuntime {
 					options.mainContextProvider,
 					() => ({
 						activeModelLabel: formatModelLabel(this.session?.model),
-						mode: options.btwModelModeProvider?.() ?? "follow-main",
+						mode: options.jarvisModelModeProvider?.() ?? "follow-main",
 					}),
 					options.communicationPermissionsProvider,
 					options.sendFollowUpToMain,
@@ -285,14 +285,14 @@ export class BtwSideSessionRuntime {
 function createSideExtensionFactory(
 	getMainSystemPrompt: SideRuntimeCreateOptions["systemPromptProvider"],
 	getMainContext: SideRuntimeCreateOptions["mainContextProvider"],
-	getBtwModelState: () => { activeModelLabel: string; mode: "follow-main" | "pinned" },
+	getJarvisModelState: () => { activeModelLabel: string; mode: "follow-main" | "pinned" },
 	getCommunicationPermissions: SideRuntimeCreateOptions["communicationPermissionsProvider"],
 	sendFollowUpToMain: SideRuntimeCreateOptions["sendFollowUpToMain"],
 	confirmSteerToMain: SideRuntimeCreateOptions["confirmSteerToMain"],
 	sendSteerToMain: SideRuntimeCreateOptions["sendSteerToMain"],
 ) {
-	const followUpToolName = "btw_send_follow_up_to_main";
-	const steerToolName = "btw_send_steer_to_main";
+	const followUpToolName = "jarvis_send_follow_up_to_main";
+	const steerToolName = "jarvis_send_steer_to_main";
 	const toolParameters = Type.Object({
 		message: Type.String({
 			minLength: 1,
@@ -303,10 +303,21 @@ function createSideExtensionFactory(
 		content: [{ type: "text" as const, text }],
 		details: { status },
 	});
+	const getActiveBridgeToolNames = () => {
+		const permissions = getCommunicationPermissions();
+		const activeToolNames: string[] = [];
+		if (permissions.allowFollowUpToMain) {
+			activeToolNames.push(followUpToolName);
+		}
+		if (permissions.allowSteerToMain) {
+			activeToolNames.push(steerToolName);
+		}
+		return activeToolNames;
+	};
 	const getCommunicationPrompt = () => {
 		const permissions = getCommunicationPermissions();
 		return [
-			"Main-agent communication bridge for this /btw turn:",
+			"Main-agent communication bridge for this /jarvis turn:",
 			permissions.allowFollowUpToMain
 				? "- `" + followUpToolName + "` sends a non-interrupting followUp message to the main agent. It is enabled right now."
 				: "- `" + followUpToolName + "` sends a non-interrupting followUp message to the main agent. It is disabled right now; attempts are blocked.",
@@ -319,11 +330,11 @@ function createSideExtensionFactory(
 	return (pi: ExtensionAPI): void => {
 		pi.registerTool({
 			name: followUpToolName,
-			label: "Send /btw followUp to main",
-			description: "Queue a followUp message for the main agent without interrupting the current turn. Use only when the user explicitly wants /btw to pass something back to the main agent.",
+			label: "Send /jarvis followUp to main",
+			description: "Queue a followUp message for the main agent without interrupting the current turn. Use only when the user explicitly wants /jarvis to pass something back to the main agent.",
 			promptSnippet: followUpToolName + "(message) - queue a non-interrupting followUp message to the main agent when permission is enabled.",
 			promptGuidelines: [
-				"Use this only when the user explicitly wants /btw to pass a note back to the main agent.",
+				"Use this only when the user explicitly wants /jarvis to pass a note back to the main agent.",
 				"This uses followUp delivery and should not interrupt the current turn.",
 			],
 			parameters: toolParameters,
@@ -333,7 +344,7 @@ function createSideExtensionFactory(
 					return createToolResult("blocked", "Cannot send an empty followUp message to the main agent.");
 				}
 				if (!getCommunicationPermissions().allowFollowUpToMain) {
-					return createToolResult("blocked", "Follow-up to the main agent is disabled for /btw.");
+					return createToolResult("blocked", "Follow-up to the main agent is disabled for /jarvis.");
 				}
 				sendFollowUpToMain(message);
 				return createToolResult("sent", "Sent followUp to the main agent: " + message);
@@ -342,7 +353,7 @@ function createSideExtensionFactory(
 
 		pi.registerTool({
 			name: steerToolName,
-			label: "Send /btw steer to main",
+			label: "Send /jarvis steer to main",
 			description: "Send a steer message to the main agent. This can interrupt or redirect the main turn, so use it only when the user explicitly wants that. Every actual send requires confirmation.",
 			promptSnippet: steerToolName + "(message) - send a confirmation-gated steer message to the main agent when permission is enabled.",
 			promptGuidelines: [
@@ -356,7 +367,7 @@ function createSideExtensionFactory(
 					return createToolResult("blocked", "Cannot send an empty steer message to the main agent.");
 				}
 				if (!getCommunicationPermissions().allowSteerToMain) {
-					return createToolResult("blocked", "Steer to the main agent is disabled for /btw.");
+					return createToolResult("blocked", "Steer to the main agent is disabled for /jarvis.");
 				}
 				const confirmed = await confirmSteerToMain(message);
 				if (!confirmed) {
@@ -367,19 +378,23 @@ function createSideExtensionFactory(
 			},
 		});
 
+		pi.on("session_start", async () => {
+			pi.setActiveTools(getActiveBridgeToolNames());
+		});
 		pi.on("before_agent_start", async () => {
+			pi.setActiveTools(getActiveBridgeToolNames());
 			const mainContext = getMainContext();
-			const btwModelState = getBtwModelState();
-			const btwModelPrompt =
-				btwModelState.mode === "follow-main"
-					? `/btw model for this turn: ${btwModelState.activeModelLabel} (following main model)`
-					: `/btw model for this turn: ${btwModelState.activeModelLabel} (pinned override)`;
+			const jarvisModelState = getJarvisModelState();
+			const jarvisModelPrompt =
+				jarvisModelState.mode === "follow-main"
+					? `/jarvis model for this turn: ${jarvisModelState.activeModelLabel} (following main model)`
+					: `/jarvis model for this turn: ${jarvisModelState.activeModelLabel} (pinned override)`;
 			const systemPrompt = [
 				getMainSystemPrompt().trim(),
 				SIDE_SYSTEM_PROMPT,
-				btwModelPrompt,
+				jarvisModelPrompt,
 				getCommunicationPrompt(),
-				"Injected main-session context for this /btw turn:",
+				"Injected main-session context for this /jarvis turn:",
 				mainContext.summaryText.trim(),
 				mainContext.recentText.trim(),
 			]
@@ -391,7 +406,7 @@ function createSideExtensionFactory(
 }
 
 function createSideUiContext(
-	bridge: BtwOverlayBridge,
+	bridge: JarvisOverlayBridge,
 	themeProvider: () => ExtensionContext["ui"]["theme"],
 ): ExtensionContext["ui"] {
 	let editorText = "";
@@ -409,7 +424,7 @@ function createSideUiContext(
 		setHeader: () => {},
 		setTitle: () => {},
 		custom: async () => {
-			throw new Error("/btw side session does not support custom extension UI.");
+			throw new Error("/jarvis side session does not support custom extension UI.");
 		},
 		pasteToEditor: (text: string) => {
 			editorText += text;
@@ -425,7 +440,7 @@ function createSideUiContext(
 		},
 		getAllThemes: () => [],
 		getTheme: () => undefined,
-		setTheme: () => ({ success: false, error: "Theme switching is unavailable inside /btw." }),
+		setTheme: () => ({ success: false, error: "Theme switching is unavailable inside /jarvis." }),
 		getToolsExpanded: () => false,
 		setToolsExpanded: () => {},
 	} as ExtensionContext["ui"];
@@ -503,7 +518,7 @@ function formatToolCall(toolName: string, args: Record<string, unknown> | undefi
 	return json.length > 72 ? `${toolName} ${json.slice(0, 69)}...` : `${toolName} ${json}`;
 }
 
-function formatMessageForOverlay(message: any): BtwDisplayEntry[] {
+function formatMessageForOverlay(message: any): JarvisDisplayEntry[] {
 	switch (message.role) {
 		case "user": {
 			const text = extractTextContent(message.content);
@@ -511,7 +526,7 @@ function formatMessageForOverlay(message: any): BtwDisplayEntry[] {
 		}
 		case "assistant": {
 			const text = extractAssistantText(message);
-			const entries: BtwDisplayEntry[] = [];
+			const entries: JarvisDisplayEntry[] = [];
 			if (text) {
 				entries.push({ kind: "assistant", text });
 			}

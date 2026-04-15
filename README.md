@@ -1,19 +1,19 @@
-# pi-btw
+# pi-jarvis
 
-`pi-btw` is a Pi extension that opens a `/btw` side-conversation overlay inside the Pi coding agent.
+`pi-jarvis` is a Pi extension that opens a `/jarvis` side-conversation overlay inside the Pi coding agent.
 
 ## Features
 
-- Opens a floating `/btw` overlay from within the current Pi session
+- Opens a floating `/jarvis` overlay from within the current Pi session
 - Keeps a separate side-session history
-- Restores prior `/btw` conversation state from the session file
+- Restores prior `/jarvis` conversation state from the session file
 - Preserves the active Pi model selection for the side conversation
 - Includes a small automated test suite
 
 ## Installation
 
 ```bash
-npm install pi-btw
+npm install pi-jarvis
 ```
 
 Then register the extension in Pi using the built package entrypoint.

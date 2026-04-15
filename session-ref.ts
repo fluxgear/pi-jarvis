@@ -1,6 +1,6 @@
-export const BTW_SESSION_REF_CUSTOM_TYPE = "btw.session-ref";
+export const JARVIS_SESSION_REF_CUSTOM_TYPE = "jarvis.session-ref";
 
-export interface BtwSessionRef {
+export interface JarvisSessionRef {
 	version: 1;
 	file: string;
 }
@@ -11,13 +11,13 @@ type BranchEntryLike = {
 	data?: unknown;
 };
 
-export function readBtwSessionRef(entries: readonly BranchEntryLike[]): BtwSessionRef | undefined {
+export function readJarvisSessionRef(entries: readonly BranchEntryLike[]): JarvisSessionRef | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (entry.type !== "custom" || entry.customType !== BTW_SESSION_REF_CUSTOM_TYPE) {
+		if (entry.type !== "custom" || entry.customType !== JARVIS_SESSION_REF_CUSTOM_TYPE) {
 			continue;
 		}
-		const ref = parseBtwSessionRef(entry.data);
+		const ref = parseJarvisSessionRef(entry.data);
 		if (ref) {
 			return ref;
 		}
@@ -25,14 +25,14 @@ export function readBtwSessionRef(entries: readonly BranchEntryLike[]): BtwSessi
 	return undefined;
 }
 
-export function createBtwSessionRef(file: string): BtwSessionRef {
+export function createJarvisSessionRef(file: string): JarvisSessionRef {
 	return {
 		version: 1,
 		file,
 	};
 }
 
-function parseBtwSessionRef(data: unknown): BtwSessionRef | undefined {
+function parseJarvisSessionRef(data: unknown): JarvisSessionRef | undefined {
 	if (!data || typeof data !== "object") {
 		return undefined;
 	}

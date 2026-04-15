@@ -1,12 +1,12 @@
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { Input, CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@mariozechner/pi-tui";
 
-export interface BtwDisplayEntry {
+export interface JarvisDisplayEntry {
 	kind: "user" | "assistant" | "tool" | "system" | "status";
 	text: string;
 }
 
-export interface BtwOverlayView {
+export interface JarvisOverlayView {
 	isReady(): boolean;
 	isStreaming(): boolean;
 	getModelLabel(): string;
@@ -17,7 +17,7 @@ export interface BtwOverlayView {
 	isSteerToMainEnabled(): boolean;
 	toggleFollowUpToMain(): void;
 	toggleSteerToMain(): void;
-	getDisplayEntries(): BtwDisplayEntry[];
+	getDisplayEntries(): JarvisDisplayEntry[];
 	sendMessage(text: string): Promise<void>;
 }
 
@@ -32,23 +32,23 @@ interface NotificationItem {
 	timestamp: number;
 }
 
-export interface BtwPendingConfirmation {
+export interface JarvisPendingConfirmation {
 	title: string;
 	message: string;
 }
 
-interface PendingConfirmationRecord extends BtwPendingConfirmation {
+interface PendingConfirmationRecord extends JarvisPendingConfirmation {
 	resolve: (value: boolean) => void;
 }
 
-export interface BtwOverlaySnapshot {
+export interface JarvisOverlaySnapshot {
 	statuses: string[];
 	notifications: NotificationItem[];
 	workingMessage?: string;
-	pendingConfirmation?: BtwPendingConfirmation;
+	pendingConfirmation?: JarvisPendingConfirmation;
 }
 
-export class BtwOverlayBridge {
+export class JarvisOverlayBridge {
 	private requestRender?: () => void;
 	private statuses = new Map<string, string>();
 	private notifications: NotificationItem[] = [];
@@ -130,14 +130,14 @@ export class BtwOverlayBridge {
 		return this.pendingConfirmation !== undefined;
 	}
 
-	getPendingConfirmation(): BtwPendingConfirmation | undefined {
+	getPendingConfirmation(): JarvisPendingConfirmation | undefined {
 		if (!this.pendingConfirmation) {
 			return undefined;
 		}
 		return { title: this.pendingConfirmation.title, message: this.pendingConfirmation.message };
 	}
 
-	snapshot(): BtwOverlaySnapshot {
+	snapshot(): JarvisOverlaySnapshot {
 		return {
 			statuses: Array.from(this.statuses.values()),
 			notifications: [...this.notifications],
@@ -151,17 +151,19 @@ export class BtwOverlayBridge {
 	}
 }
 
-export class BtwOverlayComponent implements Component, Focusable {
+export class JarvisOverlayComponent implements Component, Focusable {
 	focused = false;
 	private readonly input = new Input();
 	private readonly maxHeightProvider: () => number;
 	private focusTarget: OverlayFocusTarget = "input";
+	private historyIndex = -1;
+	private historyDraft = "";
 
 	constructor(
 		private readonly tui: TUI,
 		private readonly theme: Theme,
-		private readonly bridge: BtwOverlayBridge,
-		private readonly view: BtwOverlayView,
+		private readonly bridge: JarvisOverlayBridge,
+		private readonly view: JarvisOverlayView,
 		private readonly close: () => void,
 	) {
 		this.maxHeightProvider = () => Math.max(18, Math.floor(this.tui.terminal.rows * 0.78));
@@ -172,6 +174,8 @@ export class BtwOverlayComponent implements Component, Focusable {
 				return;
 			}
 			this.input.setValue("");
+			this.historyIndex = -1;
+			this.historyDraft = "";
 			void this.view.sendMessage(message);
 		};
 		this.input.onEscape = () => {
@@ -211,6 +215,32 @@ export class BtwOverlayComponent implements Component, Focusable {
 			return;
 		}
 		if (this.focusTarget !== "input") {
+			return;
+		}
+
+		if (matchesKey(data, "up") || matchesKey(data, "down")) {
+			const entries = this.view.getDisplayEntries().filter((e) => e.kind === "user");
+			if (entries.length === 0) return;
+
+			if (matchesKey(data, "up")) {
+				if (this.historyIndex === -1) {
+					this.historyDraft = this.input.getValue();
+					this.historyIndex = entries.length - 1;
+				} else {
+					this.historyIndex = Math.max(0, this.historyIndex - 1);
+				}
+				this.input.setValue(entries[this.historyIndex].text);
+			} else {
+				if (this.historyIndex !== -1) {
+					this.historyIndex++;
+					if (this.historyIndex >= entries.length) {
+						this.historyIndex = -1;
+						this.input.setValue(this.historyDraft);
+					} else {
+						this.input.setValue(entries[this.historyIndex].text);
+					}
+				}
+			}
 			return;
 		}
 
@@ -271,7 +301,7 @@ export class BtwOverlayComponent implements Component, Focusable {
 		return lines;
 	}
 
-	private renderConfirmation(confirmation: BtwPendingConfirmation, innerWidth: number): string[] {
+	private renderConfirmation(confirmation: JarvisPendingConfirmation, innerWidth: number): string[] {
 		const lines: string[] = [];
 		lines.push(this.theme.bold(this.theme.fg("warning", `▶ ${confirmation.title}`)));
 		for (const rawLine of confirmation.message.split("\n")) {
@@ -297,14 +327,14 @@ export class BtwOverlayComponent implements Component, Focusable {
 		const followUpToggle = this.renderToggle("FollowUp", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
 		const steerToggle = this.renderToggle("Steer", this.view.isSteerToMainEnabled(), this.focused && this.focusTarget === "steer");
 		return [
-			truncateToWidth(`${this.theme.bold(this.theme.fg("accent", "/btw"))}  ${this.theme.fg("accent", "Main:")} ${this.theme.fg(mainStatusColor, mainStatus)}`, innerWidth),
+			truncateToWidth(`${this.theme.bold(this.theme.fg("accent", "/jarvis"))}  ${this.theme.fg("accent", "Main:")} ${this.theme.fg(mainStatusColor, mainStatus)}`, innerWidth),
 			truncateToWidth(this.theme.fg("muted", `Main model: ${this.view.getMainModelLabel()}`), innerWidth, "", true),
-			truncateToWidth(this.theme.fg("muted", `/btw model: ${this.view.getModelLabel()} (${this.view.getModelModeLabel()})`), innerWidth, "", true),
+			truncateToWidth(this.theme.fg("muted", `/jarvis model: ${this.view.getModelLabel()} (${this.view.getModelModeLabel()})`), innerWidth, "", true),
 			truncateToWidth(`${followUpToggle}  ${steerToggle}`, innerWidth, "", true),
 		];
 	}
 
-	private renderTranscript(innerWidth: number, budget: number, snapshot: BtwOverlaySnapshot): string[] {
+	private renderTranscript(innerWidth: number, budget: number, snapshot: JarvisOverlaySnapshot): string[] {
 		const lines: string[] = [];
 		for (const entry of this.view.getDisplayEntries()) {
 			lines.push(...this.renderEntry(entry, innerWidth));
@@ -322,12 +352,12 @@ export class BtwOverlayComponent implements Component, Focusable {
 		return collapsed;
 	}
 
-	private renderEntry(entry: BtwDisplayEntry, innerWidth: number): string[] {
+	private renderEntry(entry: JarvisDisplayEntry, innerWidth: number): string[] {
 		switch (entry.kind) {
 			case "user":
 				return this.wrapWithPrefix(this.theme.fg("accent", "you"), entry.text, innerWidth);
 			case "assistant":
-				return this.wrapWithPrefix(this.theme.fg("success", "btw"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("success", "jarvis"), entry.text, innerWidth);
 			case "tool":
 				return this.wrapWithPrefix(this.theme.fg("warning", "tool"), entry.text, innerWidth);
 			case "status":
@@ -412,7 +442,7 @@ export class BtwOverlayComponent implements Component, Focusable {
 	}
 }
 
-export function attachOverlayBridge(component: BtwOverlayComponent, bridge: BtwOverlayBridge, tui: TUI): BtwOverlayComponent {
+export function attachOverlayBridge(component: JarvisOverlayComponent, bridge: JarvisOverlayBridge, tui: TUI): JarvisOverlayComponent {
 	bridge.attach(() => tui.requestRender());
 	return component;
 }

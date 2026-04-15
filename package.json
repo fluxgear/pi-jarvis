@@ -1,7 +1,7 @@
 {
-  "name": "pi-btw",
-  "version": "1.0.1",
-  "description": "A /btw side-conversation overlay extension for Pi.",
+  "name": "pi-jarvis",
+  "version": "1.0.3",
+  "description": "A /jarvis side-conversation overlay extension for Pi.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -20,11 +20,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fluxgear/pi-btw.git"
+    "url": "git+https://github.com/fluxgear/pi-jarvis.git"
   },
-  "homepage": "https://github.com/fluxgear/pi-btw#readme",
+  "homepage": "https://github.com/fluxgear/pi-jarvis#readme",
   "bugs": {
-    "url": "https://github.com/fluxgear/pi-btw/issues"
+    "url": "https://github.com/fluxgear/pi-jarvis/issues"
   },
   "keywords": [
     "pi",
@@ -42,7 +42,7 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "prepack": "npm run build",
-    "test": "npm run check && node --import tsx test/btw.test.ts"
+    "test": "npm run check && node --import tsx test/jarvis.test.ts"
   },
   "dependencies": {
     "pi-mcp-adapter": "^2.2.1"

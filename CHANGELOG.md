@@ -7,10 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [0.1.0] - 2026-04-06
 
 ### Added
-- Initial public release of `pi-btw`, a Pi extension that opens a `/btw` side-conversation overlay inside the active Pi session.
-- Persistent side-session storage and restoration for `/btw` conversations.
-- Main-model synchronization so `/btw` follows the current Pi model selection.
+- Initial public release of `pi-jarvis`, a Pi extension that opens a `/jarvis` side-conversation overlay inside the active Pi session.
+- Persistent side-session storage and restoration for `/jarvis` conversations.
+- Main-model synchronization so `/jarvis` follows the current Pi model selection.
 - Automated type-check and regression test coverage.
 
 ### Changed
-- Added live main-session state capture as groundwork for future context-aware `/btw` behavior without replaying the full transcript.
+- Added live main-session state capture as groundwork for future context-aware `/jarvis` behavior without replaying the full transcript.
