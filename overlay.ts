@@ -96,14 +96,6 @@ export class JarvisOverlayBridge {
 		this.emit();
 	}
 
-	/**
-	 * Request a confirmation from the user. The returned promise resolves to
-	 * `true` if the user confirms, `false` if they cancel, if `reset()` is
-	 * called, or if a newer confirmation supersedes this one. Callers must not
-	 * rely on the confirmation being answered immediately — the overlay may be
-	 * closed when this is invoked, in which case the pending confirmation is
-	 * held until the overlay is re-opened and the user answers it.
-	 */
 	requestConfirmation(title: string, message: string): Promise<boolean> {
 		if (this.pendingConfirmation) {
 			const previous = this.pendingConfirmation;
@@ -158,6 +150,8 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	private focusTarget: OverlayFocusTarget = "input";
 	private historyIndex = -1;
 	private historyDraft = "";
+	private thinkingAnimationTick = 0;
+	private thinkingAnimationTimer?: NodeJS.Timeout;
 
 	constructor(
 		private readonly tui: TUI,
@@ -318,29 +312,33 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	invalidate(): void {}
 
 	dispose(): void {
+		this.stopThinkingAnimation();
 		this.bridge.detach();
 	}
 
 	private renderHeader(innerWidth: number): string[] {
 		const mainStatus = this.view.getMainStatusLabel();
 		const mainStatusColor = mainStatus === "busy" ? "warning" : "success";
-		const followUpToggle = this.renderToggle("FollowUp", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
+		const followUpToggle = this.renderToggle("Follow-up", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
 		const steerToggle = this.renderToggle("Steer", this.view.isSteerToMainEnabled(), this.focused && this.focusTarget === "steer");
 		return [
-			truncateToWidth(`${this.theme.bold(this.theme.fg("accent", "/jarvis"))}  ${this.theme.fg("accent", "Main:")} ${this.theme.fg(mainStatusColor, mainStatus)}`, innerWidth),
+			truncateToWidth(`${this.theme.bold(this.theme.fg("accent", "Jarvis"))}  ${this.theme.fg("accent", "Main:")} ${this.theme.fg(mainStatusColor, mainStatus)}`, innerWidth),
 			truncateToWidth(this.theme.fg("muted", `Main model: ${this.view.getMainModelLabel()}`), innerWidth, "", true),
-			truncateToWidth(this.theme.fg("muted", `/jarvis model: ${this.view.getModelLabel()} (${this.view.getModelModeLabel()})`), innerWidth, "", true),
+			truncateToWidth(this.theme.fg("muted", `Jarvis model: ${this.view.getModelLabel()} (${this.view.getModelModeLabel()})`), innerWidth, "", true),
 			truncateToWidth(`${followUpToggle}  ${steerToggle}`, innerWidth, "", true),
 		];
 	}
 
 	private renderTranscript(innerWidth: number, budget: number, snapshot: JarvisOverlaySnapshot): string[] {
 		const lines: string[] = [];
-		for (const entry of this.view.getDisplayEntries()) {
+		const displayEntries = this.view.getDisplayEntries();
+		const showAnimatedThinkingFallback = Boolean(snapshot.workingMessage && this.view.isStreaming());
+		this.syncThinkingAnimation(showAnimatedThinkingFallback);
+		for (const entry of displayEntries) {
 			lines.push(...this.renderEntry(entry, innerWidth));
 		}
-		if (snapshot.workingMessage && this.view.isStreaming()) {
-			lines.push(...this.wrapBlock(this.theme.fg("warning", `… ${snapshot.workingMessage}`), innerWidth));
+		if (showAnimatedThinkingFallback) {
+			lines.push(...this.renderAnimatedThinkingFallback(innerWidth, snapshot.workingMessage!));
 		}
 		for (const status of snapshot.statuses) {
 			lines.push(...this.wrapBlock(status, innerWidth));
@@ -355,13 +353,13 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	private renderEntry(entry: JarvisDisplayEntry, innerWidth: number): string[] {
 		switch (entry.kind) {
 			case "user":
-				return this.wrapWithPrefix(this.theme.fg("accent", "you"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("accent", "User:"), entry.text, innerWidth);
 			case "assistant":
-				return this.wrapWithPrefix(this.theme.fg("success", "jarvis"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("success", "Jarvis:"), entry.text, innerWidth);
 			case "tool":
-				return this.wrapWithPrefix(this.theme.fg("warning", "tool"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("warning", "Tool:"), entry.text, innerWidth);
 			case "status":
-				return this.wrapWithPrefix(this.theme.fg("muted", "note"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("muted", "Note:"), entry.text, innerWidth);
 			case "system":
 			default:
 				return this.wrapBlock(this.theme.fg("muted", entry.text), innerWidth);
@@ -406,6 +404,54 @@ export class JarvisOverlayComponent implements Component, Focusable {
 				this.view.toggleSteerToMain();
 				break;
 		}
+	}
+
+	private syncThinkingAnimation(active: boolean): void {
+		if (active) {
+			if (!this.thinkingAnimationTimer) {
+				this.thinkingAnimationTimer = setInterval(() => {
+					this.thinkingAnimationTick += 1;
+					this.tui.requestRender();
+				}, 80);
+			}
+			return;
+		}
+		this.stopThinkingAnimation();
+	}
+
+	private stopThinkingAnimation(): void {
+		if (!this.thinkingAnimationTimer) {
+			return;
+		}
+		clearInterval(this.thinkingAnimationTimer);
+		this.thinkingAnimationTimer = undefined;
+		this.thinkingAnimationTick = 0;
+	}
+
+	private renderAnimatedThinkingFallback(innerWidth: number, message: string): string[] {
+		const icons = ["◈", "◆", "◇", "✦", "✧", "✦"];
+		const icon = icons[this.thinkingAnimationTick % icons.length] ?? "◈";
+		const shimmerText = this.renderShimmeringThinkingText(message);
+		return this.wrapBlock(`${this.theme.bold(this.theme.fg("accent", icon))} ${shimmerText}`, innerWidth);
+	}
+
+	private renderShimmeringThinkingText(text: string): string {
+		const chars = [...text];
+		if (chars.length === 0) {
+			return "";
+		}
+		const highlightIndex = this.thinkingAnimationTick % chars.length;
+		return chars
+			.map((char, index) => {
+				const distance = Math.abs(index - highlightIndex);
+				const color = distance === 0
+					? [232, 239, 247]
+					: distance === 1
+						? [171, 182, 198]
+						: [112, 122, 138];
+				return `\x1b[38;2;${color[0]};${color[1]};${color[2]}m${char}`;
+			})
+			.join("") + "\x1b[0m";
 	}
 
 	private wrapWithPrefix(prefix: string, text: string, innerWidth: number): string[] {

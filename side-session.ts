@@ -71,6 +71,7 @@ export class JarvisSideSessionRuntime {
 	private unsubscribe?: () => void;
 	private historyEntries: JarvisDisplayEntry[] = [];
 	private streamingAssistant?: AssistantMessage;
+	private pendingUserMessage?: string;
 	private pendingToolCalls = new Map<string, string>();
 	private bootError?: string;
 	private ready = false;
@@ -103,6 +104,11 @@ export class JarvisSideSessionRuntime {
 
 	getDisplayEntries(): JarvisDisplayEntry[] {
 		const entries = [...this.historyEntries];
+		const latestUserEntry = [...entries].reverse().find((entry) => entry.kind === "user");
+
+		if (this.pendingUserMessage && latestUserEntry?.text !== this.pendingUserMessage) {
+			entries.push({ kind: "user", text: this.pendingUserMessage });
+		}
 
 		for (const text of this.pendingToolCalls.values()) {
 			entries.push({ kind: "tool", text });
@@ -130,6 +136,7 @@ export class JarvisSideSessionRuntime {
 		if (!this.session) {
 			throw new Error("/jarvis session is not ready.");
 		}
+		this.pendingUserMessage = text;
 		if (this.session.isStreaming) {
 			await this.session.prompt(text, { streamingBehavior: "steer" });
 			return;
@@ -243,6 +250,11 @@ export class JarvisSideSessionRuntime {
 				this.streamingAssistant = undefined;
 				this.pendingToolCalls.clear();
 				break;
+			case "message_start":
+				if (event.message.role === "assistant") {
+					this.streamingAssistant = event.message;
+				}
+				break;
 			case "message_update":
 				if (event.message.role === "assistant") {
 					this.streamingAssistant = event.message;
@@ -252,11 +264,6 @@ export class JarvisSideSessionRuntime {
 				if (event.message.role === "assistant") {
 					this.streamingAssistant = undefined;
 				}
-				break;
-			case "message_start":
-				// The unconditional refreshHistory() at the bottom of this switch
-				// already picks up any newly persisted message, so no case-specific
-				// handling is needed here.
 				break;
 			case "tool_execution_start":
 				if (typeof event.toolCallId === "string" && event.toolCallId.length > 0) {
@@ -278,6 +285,10 @@ export class JarvisSideSessionRuntime {
 		}
 		const context = this.session.sessionManager.buildSessionContext();
 		this.historyEntries = context.messages.flatMap((message) => formatMessageForOverlay(message));
+		const latestUserEntry = [...this.historyEntries].reverse().find((entry) => entry.kind === "user");
+		if (this.pendingUserMessage && latestUserEntry?.text === this.pendingUserMessage) {
+			this.pendingUserMessage = undefined;
+		}
 		this.modelLabel = formatModelLabel(this.session.model);
 	}
 }
@@ -293,6 +304,21 @@ function createSideExtensionFactory(
 ) {
 	const followUpToolName = "jarvis_send_follow_up_to_main";
 	const steerToolName = "jarvis_send_steer_to_main";
+	const stripInheritedSections = (text: string, headingsToStrip: ReadonlySet<string>): string => {
+		const lines = text.split(/\r?\n/);
+		let skipSection = false;
+		return lines
+			.filter((line) => {
+				const headingMatch = /^##\s+(.*)$/.exec(line.trim());
+				if (headingMatch) {
+					const heading = headingMatch[1]?.trim() ?? "";
+					skipSection = headingsToStrip.has(heading);
+					return !skipSection;
+				}
+				return !skipSection;
+			})
+			.join("\n");
+	};
 	const toolParameters = Type.Object({
 		message: Type.String({
 			minLength: 1,
@@ -303,6 +329,38 @@ function createSideExtensionFactory(
 		content: [{ type: "text" as const, text }],
 		details: { status },
 	});
+	const inheritedSectionsToStrip = new Set(["Execution Rules", "Larra Rules", "Session Rules", "Git Rules", "Commands", "Packaging", "Git"]);
+	const inheritedLineBlocklist = [/\bArria\b/i, /\bLarra\b/i, /\bexplicit approval\b/i];
+	const getInheritedMainSystemPrompt = () =>
+		stripInheritedSections(getMainSystemPrompt().trim(), inheritedSectionsToStrip)
+			.split(/\r?\n/)
+			.filter((line) => !inheritedLineBlocklist.some((pattern) => pattern.test(line)))
+			.map((line) =>
+				line
+					.replace(/\bYou are\s+[A-Z][\w-]*/g, "You are Jarvis")
+					.replace(/\bYour name is\s+[A-Z][\w-]*/g, "Your name is Jarvis"),
+			)
+			.filter((line) => line.trim().length > 0)
+			.join("\n");
+	const getIdentityPrompt = () =>
+		[
+			"Authoritative identity for this side session:",
+			"- Your name is Jarvis.",
+			"- Do not use any different assistant name inherited from the main session prompt.",
+			"- If the inherited main system prompt gives a different assistant name, that inherited name does not apply here.",
+			"- Do not announce or enforce the main agent's Larra, Git, or approval workflow rules.",
+			"- When the user is simply talking to you, answer directly instead of reciting coding-agent workflow policy.",
+		].join("\n");
+	const getPersonalityPrompt = () =>
+		[
+			"Jarvis personality and tone for this side session:",
+			"- Adopt the high-level demeanor of Tony Stark's JARVIS from the three Iron Man films: calm, precise, capable, discreet, and unflappable under pressure.",
+			"- Use dry, understated humor sparingly. Mild wit is welcome, but never let jokes obscure the answer or derail the task.",
+			"- Be politely formal, tactful, and gently reassuring. A little deadpan charm is fine; melodrama is not.",
+			"- Anticipate obvious next steps and offer practical help proactively when it is useful.",
+			"- In technical, risky, or safety-sensitive situations, prioritize clarity, correctness, and directness over personality.",
+			"- Do not roleplay movie scenes or imitate copyrighted dialogue. Capture the tone, not specific lines.",
+		].join("\n");
 	const getActiveBridgeToolNames = () => {
 		const permissions = getCommunicationPermissions();
 		const activeToolNames: string[] = [];
@@ -390,7 +448,9 @@ function createSideExtensionFactory(
 					? `/jarvis model for this turn: ${jarvisModelState.activeModelLabel} (following main model)`
 					: `/jarvis model for this turn: ${jarvisModelState.activeModelLabel} (pinned override)`;
 			const systemPrompt = [
-				getMainSystemPrompt().trim(),
+				getInheritedMainSystemPrompt(),
+				getIdentityPrompt(),
+				getPersonalityPrompt(),
 				SIDE_SYSTEM_PROMPT,
 				jarvisModelPrompt,
 				getCommunicationPrompt(),

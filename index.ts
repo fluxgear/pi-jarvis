@@ -316,7 +316,7 @@ function enforceCompatibilityGuard(state: MainState): void {
 	if (!isModelBridgeCompatible(desired)) {
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
-		state.bridge.notify(`Disabled FollowUp/Steer: ${formatModelLabel(desired)} does not support bridge tools.`, "warning");
+		state.bridge.notify(`Disabled Follow-up/Steer: ${formatModelLabel(desired)} does not support bridge tools.`, "warning");
 	}
 }
 
@@ -424,7 +424,7 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 		isSteerToMainEnabled: () => state.allowSteerToMain,
 		toggleFollowUpToMain: () => {
 			if (!isModelBridgeCompatible(getDesiredJarvisModel(state))) {
-				state.bridge.notify("FollowUp is not supported by the current /jarvis model.", "warning");
+				state.bridge.notify("Follow-up is not supported by the current /jarvis model.", "warning");
 				return;
 			}
 			state.allowFollowUpToMain = !state.allowFollowUpToMain;

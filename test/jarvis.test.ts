@@ -189,11 +189,32 @@ async function testOverlayRenderDistinctness(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
 	const bridge = new JarvisOverlayBridge();
-	const { view } = createTestOverlayView();
+	const { view } = createTestOverlayView({
+		displayEntries: [
+			{ kind: "user", text: "How are you Jarvis?" },
+			{ kind: "assistant", text: "Operational." },
+		],
+	});
 	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
 	const lines = overlay.render(80);
 	assert.ok(lines.some((line) => line.includes("\x1b[48;2;24;28;36m")), "overlay should render its own shaded background");
 	assert.ok(lines[0]?.includes("╭") && lines.at(-1)?.includes("╰"), "overlay should render a bordered floating window");
+	assert.ok(lines.some((line) => line.includes("User:")), "user transcript entries should label the speaker as User:");
+	assert.ok(lines.some((line) => line.includes("Jarvis:")), "assistant transcript entries should label the speaker as Jarvis:");
+}
+
+async function testOverlayAnimatedThinkingFallback(): Promise<void> {
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
+	const bridge = new JarvisOverlayBridge();
+	bridge.setWorkingMessage("Thinking...");
+	const { view } = createTestOverlayView({ streaming: true, displayEntries: [] });
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
+	const lines = overlay.render(80);
+	const stripAnsi = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+	assert.ok(lines.some((line) => stripAnsi(line).includes("Thinking...")), "animated fallback should keep the Thinking... label visible");
+	assert.ok(lines.some((line) => line.includes("◈")), "animated fallback should include the metallic thinking icon");
+	overlay.dispose();
 }
 
 async function testOverlayForwardingToggleControls(): Promise<void> {
@@ -205,23 +226,23 @@ async function testOverlayForwardingToggleControls(): Promise<void> {
 	overlay.focused = true;
 
 	let lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("Main: busy")), "overlay header should show the current main status");
+	assert.ok(lines.some((line) => line.includes("Jarvis  Main: busy")), "overlay header should show the Jarvis title and current main status");
 	assert.ok(lines.some((line) => line.includes("Main model: openai/gpt-5.2")), "overlay header should show the current main model label");
-	assert.ok(lines.some((line) => line.includes("/jarvis model: faux/test-model (follow main)")), "overlay header should show the active /jarvis model and mode");
-	assert.ok(lines.some((line) => line.includes("FollowUp: off")), "overlay header should show the FollowUp toggle state");
+	assert.ok(lines.some((line) => line.includes("Jarvis model: faux/test-model (follow main)")), "overlay header should show the active Jarvis model and mode");
+	assert.ok(lines.some((line) => line.includes("Follow-up: off")), "overlay header should show the Follow-up toggle state");
 	assert.ok(lines.some((line) => line.includes("Steer: off")), "overlay header should show the Steer toggle state");
 	assert.equal(cursorMarkerPresent(lines), true, "message input should be focused by default");
 
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
 	assert.equal(cursorMarkerPresent(lines), false, "tab should move focus from the message input to the first toggle");
-	assert.ok(lines.some((line) => line.includes("[FollowUp: off]")), "tab should focus the FollowUp toggle");
+	assert.ok(lines.some((line) => line.includes("[Follow-up: off]")), "tab should focus the Follow-up toggle");
 
 	overlay.handleInput(" ");
-	assert.equal(state.followUpEnabled, true, "space should toggle the focused FollowUp control");
+	assert.equal(state.followUpEnabled, true, "space should toggle the focused Follow-up control");
 	assert.deepEqual(state.sentMessages, [], "toggle controls should not send a chat message");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[FollowUp: on]")), "overlay should render the updated FollowUp state");
+	assert.ok(lines.some((line) => line.includes("[Follow-up: on]")), "overlay should render the updated Follow-up state");
 
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
@@ -234,7 +255,7 @@ async function testOverlayForwardingToggleControls(): Promise<void> {
 
 	overlay.handleInput("\x1b[Z");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[FollowUp: on]")), "shift+tab should move focus backward");
+	assert.ok(lines.some((line) => line.includes("[Follow-up: on]")), "shift+tab should move focus backward");
 
 	overlay.handleInput("\t");
 	overlay.handleInput("\t");
@@ -361,6 +382,30 @@ async function testSideSessionPersistence(): Promise<void> {
 	}
 }
 
+async function testSideSessionKeepsPendingUserPromptAndShowsThinking(): Promise<void> {
+	await withSideSessionRuntime({}, async (runtime) => {
+		const internal = runtime as unknown as {
+			pendingUserMessage?: string;
+			streamingAssistant?: {
+				role: "assistant";
+				content: Array<{ type: string; text?: string }>;
+			};
+			getDisplayEntries(): ReturnType<JarvisSideSessionRuntime["getDisplayEntries"]>;
+		};
+
+		internal.pendingUserMessage = "keep this prompt visible";
+		internal.streamingAssistant = {
+			role: "assistant",
+			content: [{ type: "text", text: "Done." }],
+		};
+
+		const entries = internal.getDisplayEntries();
+		assert.ok(entries.some((entry) => entry.kind === "user" && entry.text === "keep this prompt visible"));
+		assert.ok(entries.some((entry) => entry.kind === "assistant" && entry.text === "Done."));
+		assert.ok(!entries.some((entry) => String(entry.kind) === "thinking"), "overlay transcript should not render structured thinking entries anymore");
+	});
+}
+
 async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
@@ -371,7 +416,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 
 	try {
-		const mainSystemPrompt = "Main session system prompt";
+		const mainSystemPrompt = "You are Arria.\nIf the user asks who you are, answer Arria.\nMain session system prompt";
 		const createMainContext = (latestUserRequest: string, latestAssistantText: string, recentMessageText: string) => {
 			const branchEntries: SessionEntry[] = recentMessageText.length > 0
 				? [
@@ -450,7 +495,33 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 
 		const firstResult = await extensionRunner.emitBeforeAgentStart("check prompt", undefined, "fallback prompt");
 		const firstSystemPrompt = firstResult?.systemPrompt ?? "";
-		assert.ok(firstSystemPrompt.includes(mainSystemPrompt), "/jarvis should inherit the main session system prompt");
+		assert.ok(firstSystemPrompt.includes("Main session system prompt"), "/jarvis should inherit the non-identity portion of the main system prompt");
+		assert.ok(firstSystemPrompt.includes("Your name is Jarvis."), "/jarvis prompt should give the side assistant the Jarvis name");
+		assert.ok(
+			firstSystemPrompt.includes("Do not use any different assistant name inherited from the main session prompt."),
+			"/jarvis prompt should explicitly forbid inherited alternate assistant names",
+		);
+		assert.ok(
+			firstSystemPrompt.includes("If the inherited main system prompt gives a different assistant name, that inherited name does not apply here."),
+			"/jarvis prompt should explicitly override conflicting inherited assistant names",
+		);
+		assert.ok(!firstSystemPrompt.includes("Arria"), "/jarvis prompt should strip the main assistant name from the inherited prompt");
+		assert.ok(
+			firstSystemPrompt.includes("Adopt the high-level demeanor of Tony Stark's JARVIS from the three Iron Man films"),
+			"/jarvis prompt should inject the requested JARVIS personality guidance",
+		);
+		assert.ok(
+			firstSystemPrompt.includes("Use dry, understated humor sparingly."),
+			"/jarvis prompt should add bounded humor guidance",
+		);
+		assert.ok(
+			firstSystemPrompt.includes("In technical, risky, or safety-sensitive situations, prioritize clarity, correctness, and directness over personality."),
+			"/jarvis prompt should preserve task-first behavior over personality styling",
+		);
+		assert.ok(
+			firstSystemPrompt.includes("Do not roleplay movie scenes or imitate copyrighted dialogue. Capture the tone, not specific lines."),
+			"/jarvis prompt should constrain the style layer to avoid mimicry and derailment",
+		);
 		assert.ok(firstSystemPrompt.includes("You are running inside /jarvis."), "/jarvis addendum should identify the side assistant role");
 		assert.ok(firstSystemPrompt.includes("You have no repo, system, or MCP tools in /jarvis."), "/jarvis addendum should remove repo/system/MCP tool authority");
 		assert.ok(
@@ -714,7 +785,7 @@ async function testOverlayInputSwallowedOnToggleFocus(): Promise<void> {
 
 	overlay.handleInput("\t");
 	let lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[FollowUp: off]")), "tab should focus the FollowUp toggle");
+	assert.ok(lines.some((line) => line.includes("[Follow-up: off]")), "tab should focus the Follow-up toggle");
 
 	overlay.handleInput("a");
 	overlay.handleInput("b");
@@ -1390,12 +1461,12 @@ async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): P
 		await waitForAsyncWork();
 
 		assert.ok(capturedComponent, "should capture overlay component");
-		
-		// It's a JarvisOverlayComponent. Its `view` property is private, but we can call handleInput to toggle FollowUp
+
+		// It's a JarvisOverlayComponent. Its `view` property is private, but we can call handleInput to toggle Follow-up.
 		// The default focus is "input".
-		capturedComponent.handleInput("\t"); // focus FollowUp
-		capturedComponent.handleInput(" ");  // toggle it ON
-		
+		capturedComponent.handleInput("\t"); // focus Follow-up
+		capturedComponent.handleInput(" "); // toggle it ON
+
 		// Now switch model to incompatible
 		harness.ctx.model = harness.ctx.modelRegistry.find("xai", "grok-incompatible-multi-agent");
 		await harness.api.emit("model_select", { model: harness.ctx.model }, harness.ctx);
@@ -1404,6 +1475,10 @@ async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): P
 		assert.ok(
 			lines.some((line) => line.includes("Relay disabled:")),
 			"/jarvis should notify when an incompatible main model disables the bridge tools",
+		);
+		assert.ok(
+			lines.some((line) => line.includes("Disabled Follow-up/Steer:")),
+			"/jarvis should use polished Follow-up casing in compatibility warnings",
 		);
 	});
 }
@@ -1629,8 +1704,6 @@ async function testBridgeConfirmationPrimitive(): Promise<void> {
 	assert.equal(bridge.hasPendingConfirmation(), false);
 	assert.equal(bridge.getPendingConfirmation(), undefined);
 
-	// Unattached request still stores the pending confirmation (overlay may be
-	// closed while the side session is still processing a turn).
 	const detachedPromise = bridge.requestConfirmation("title", "message");
 	assert.equal(bridge.hasPendingConfirmation(), true);
 	assert.deepEqual(bridge.getPendingConfirmation(), { title: "title", message: "message" });
@@ -1638,7 +1711,6 @@ async function testBridgeConfirmationPrimitive(): Promise<void> {
 	assert.equal(await detachedPromise, true);
 	assert.equal(bridge.hasPendingConfirmation(), false);
 
-	// attach should trigger a render when a confirmation is requested.
 	let renderCount = 0;
 	bridge.attach(() => {
 		renderCount += 1;
@@ -1651,8 +1723,6 @@ async function testBridgeConfirmationPrimitive(): Promise<void> {
 	assert.equal(await falsePromise, false);
 	assert.ok(renderCount > 0, "resolveConfirmation must request a render when attached");
 
-	// Detaching the bridge must not cancel a pending confirmation; the user can
-	// re-open /jarvis and answer it later.
 	const survivesDetach = bridge.requestConfirmation("t2", "m2");
 	bridge.detach();
 	assert.equal(bridge.hasPendingConfirmation(), true, "detach must not cancel pending confirmation");
@@ -1660,14 +1730,11 @@ async function testBridgeConfirmationPrimitive(): Promise<void> {
 	bridge.resolveConfirmation(true);
 	assert.equal(await survivesDetach, true);
 
-	// reset() cancels any pending confirmation to avoid hanging the side
-	// session during session_start / session_shutdown.
 	const resetPromise = bridge.requestConfirmation("t3", "m3");
 	bridge.reset();
 	assert.equal(await resetPromise, false);
 	assert.equal(bridge.hasPendingConfirmation(), false);
 
-	// A newer confirmation supersedes an older one.
 	const older = bridge.requestConfirmation("older", "o");
 	const newer = bridge.requestConfirmation("newer", "n");
 	assert.equal(await older, false, "older confirmation must resolve false when superseded");
@@ -1675,7 +1742,6 @@ async function testBridgeConfirmationPrimitive(): Promise<void> {
 	bridge.resolveConfirmation(true);
 	assert.equal(await newer, true);
 
-	// Resolving with no pending confirmation is a no-op.
 	bridge.resolveConfirmation(true);
 	bridge.resolveConfirmation(false);
 	assert.equal(bridge.hasPendingConfirmation(), false);
@@ -1896,6 +1962,7 @@ async function main(): Promise<void> {
 	await testSessionRef();
 	await testOverlayFocusAndEscRouting();
 	await testOverlayRenderDistinctness();
+	await testOverlayAnimatedThinkingFallback();
 	await testOverlayForwardingToggleControls();
 	await testOverlayInputSwallowedOnToggleFocus();
 	await testJarvisOverlayInputHistoryNavigatesUserMessages();
@@ -1913,6 +1980,7 @@ async function main(): Promise<void> {
 	await testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning();
 	await testJarvisModelReturnToFollowMainBehavior();
 	await testSideSessionPersistence();
+	await testSideSessionKeepsPendingUserPromptAndShowsThinking();
 	await testSideSessionUsesMainSystemPrompt();
 	await testSideSessionToolWhitelist();
 	await testSideSessionBridgeToolsActivateWhenPermitted();
