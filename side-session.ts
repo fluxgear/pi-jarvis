@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { AssistantMessage, Model } from "@mariozechner/pi-ai";
 import { Type } from "@mariozechner/pi-ai";
@@ -6,6 +7,7 @@ import {
 	DefaultResourceLoader,
 	SessionManager,
 	createAgentSession,
+	createCodingTools,
 	getAgentDir,
 	type AgentSessionEvent,
 	type ExtensionAPI,
@@ -17,11 +19,14 @@ const SIDE_SYSTEM_PROMPT = `
 Authoritative /jarvis addendum:
 - You are running inside /jarvis.
 - The main Pi agent continues independently while you assist from the side.
-- You have no repo, system, or MCP tools in /jarvis.
 - Before each /jarvis turn you will be given a deterministic summary and bounded recent view of the main session.
 - Communication permissions to the main agent via followUp / steer are controlled separately and may be enabled or disabled.
 - Use the injected main-session context to answer what is happening right now.
 `.trim();
+
+const FRESH_THREAD_CONTEXT_NOTE = "You are in a fresh /jarvis thread. Keep the opening concise and conversational, then answer directly.";
+const OPTIONAL_SIDE_TOOL_NAMES = ["read", "bash", "edit", "write", "mcp"] as const;
+const require = createRequire(import.meta.url);
 
 type SideSessionHandle = Awaited<ReturnType<typeof createAgentSession>>["session"];
 
@@ -38,6 +43,7 @@ type SideRuntimeCreateOptions = {
 		summaryText: string;
 		recentText: string;
 	};
+	toolAccessProvider: () => boolean;
 	communicationPermissionsProvider: () => {
 		allowFollowUpToMain: boolean;
 		allowSteerToMain: boolean;
@@ -45,6 +51,7 @@ type SideRuntimeCreateOptions = {
 	sendFollowUpToMain: (message: string) => void;
 	confirmSteerToMain: (message: string) => Promise<boolean>;
 	sendSteerToMain: (message: string) => void;
+	hasConversationHistory?: () => boolean;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
 };
 
@@ -76,6 +83,9 @@ export class JarvisSideSessionRuntime {
 	private bootError?: string;
 	private ready = false;
 	private modelLabel = "model unavailable";
+	private hasConversationHistory = false;
+	private toolAccessEnabled = false;
+	private syncActiveTools?: () => void;
 
 	private constructor(
 		bridge: JarvisOverlayBridge,
@@ -102,6 +112,11 @@ export class JarvisSideSessionRuntime {
 		return this.modelLabel;
 	}
 
+	setToolAccessEnabled(enabled: boolean): void {
+		this.toolAccessEnabled = enabled;
+		this.syncActiveTools?.();
+	}
+
 	getDisplayEntries(): JarvisDisplayEntry[] {
 		const entries = [...this.historyEntries];
 		const latestUserEntry = [...entries].reverse().find((entry) => entry.kind === "user");
@@ -126,7 +141,12 @@ export class JarvisSideSessionRuntime {
 		}
 
 		if (entries.length === 0) {
-			entries.push({ kind: "system", text: "Ask a quick side question here. The main session continues independently." });
+			entries.push({
+				kind: "system",
+				text: this.hasConversationHistory
+					? "Ask a quick side question here. The main session continues independently."
+					: "Welcome to /jarvis. I’m ready to help directly while the main session keeps running.",
+			});
 		}
 
 		return entries;
@@ -176,11 +196,16 @@ export class JarvisSideSessionRuntime {
 		const sideSessionManager = SessionManager.open(options.sessionFile, dirname(options.sessionFile));
 		const persistedContext = sideSessionManager.buildSessionContext();
 		const hadExistingEntries = sideSessionManager.getEntries().length > 0;
+		this.hasConversationHistory = hadExistingEntries;
+		this.toolAccessEnabled = options.toolAccessProvider();
+		const hasConversationHistory = () => this.hasConversationHistory || (options.hasConversationHistory?.() ?? false);
+		const mcpExtensionPath = resolveOptionalMcpExtensionPath();
 
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: options.cwd,
 			agentDir: getAgentDir(),
 			noExtensions: true,
+			additionalExtensionPaths: mcpExtensionPath ? [mcpExtensionPath] : [],
 			extensionFactories: [
 				createSideExtensionFactory(
 					options.systemPromptProvider,
@@ -189,10 +214,15 @@ export class JarvisSideSessionRuntime {
 						activeModelLabel: formatModelLabel(this.session?.model),
 						mode: options.jarvisModelModeProvider?.() ?? "follow-main",
 					}),
+					() => this.toolAccessEnabled,
+					(refreshActiveTools) => {
+						this.syncActiveTools = refreshActiveTools;
+					},
 					options.communicationPermissionsProvider,
 					options.sendFollowUpToMain,
 					options.confirmSteerToMain,
 					options.sendSteerToMain,
+					hasConversationHistory,
 				),
 			],
 		});
@@ -204,7 +234,7 @@ export class JarvisSideSessionRuntime {
 			modelRegistry: options.modelRegistry as any,
 			model: options.model,
 			thinkingLevel: options.thinkingLevel as any,
-			tools: [],
+			tools: createCodingTools(options.cwd),
 			resourceLoader,
 			sessionManager: sideSessionManager,
 		});
@@ -216,6 +246,7 @@ export class JarvisSideSessionRuntime {
 				this.bridge.notify(`Side extension error: ${error.error}`, "error");
 			},
 		});
+		this.syncActiveTools?.();
 
 		if (options.model && hadExistingEntries) {
 			const previousModel = persistedContext.model;
@@ -285,6 +316,9 @@ export class JarvisSideSessionRuntime {
 		}
 		const context = this.session.sessionManager.buildSessionContext();
 		this.historyEntries = context.messages.flatMap((message) => formatMessageForOverlay(message));
+		if (context.messages.length > 0) {
+			this.hasConversationHistory = true;
+		}
 		const latestUserEntry = [...this.historyEntries].reverse().find((entry) => entry.kind === "user");
 		if (this.pendingUserMessage && latestUserEntry?.text === this.pendingUserMessage) {
 			this.pendingUserMessage = undefined;
@@ -297,10 +331,13 @@ function createSideExtensionFactory(
 	getMainSystemPrompt: SideRuntimeCreateOptions["systemPromptProvider"],
 	getMainContext: SideRuntimeCreateOptions["mainContextProvider"],
 	getJarvisModelState: () => { activeModelLabel: string; mode: "follow-main" | "pinned" },
+	hasToolAccess: SideRuntimeCreateOptions["toolAccessProvider"],
+	bindActiveToolsSync: (refreshActiveTools: () => void) => void,
 	getCommunicationPermissions: SideRuntimeCreateOptions["communicationPermissionsProvider"],
 	sendFollowUpToMain: SideRuntimeCreateOptions["sendFollowUpToMain"],
 	confirmSteerToMain: SideRuntimeCreateOptions["confirmSteerToMain"],
 	sendSteerToMain: SideRuntimeCreateOptions["sendSteerToMain"],
+	hasConversationHistory?: SideRuntimeCreateOptions["hasConversationHistory"],
 ) {
 	const followUpToolName = "jarvis_send_follow_up_to_main";
 	const steerToolName = "jarvis_send_steer_to_main";
@@ -330,7 +367,13 @@ function createSideExtensionFactory(
 		details: { status },
 	});
 	const inheritedSectionsToStrip = new Set(["Execution Rules", "Larra Rules", "Session Rules", "Git Rules", "Commands", "Packaging", "Git"]);
-	const inheritedLineBlocklist = [/\bArria\b/i, /\bLarra\b/i, /\bexplicit approval\b/i];
+	const inheritedLineBlocklist = [
+		/^\s*(You are|Your name is)\s+[A-Z][\w-]*/i,
+		/\bIf the user asks who you are\b/i,
+		/\bLarra\b/i,
+		/\bexplicit approval\b/i,
+	];
+	const getMainAgentName = () => extractPrimaryAssistantName(getMainSystemPrompt());
 	const getInheritedMainSystemPrompt = () =>
 		stripInheritedSections(getMainSystemPrompt().trim(), inheritedSectionsToStrip)
 			.split(/\r?\n/)
@@ -342,15 +385,22 @@ function createSideExtensionFactory(
 			)
 			.filter((line) => line.trim().length > 0)
 			.join("\n");
-	const getIdentityPrompt = () =>
-		[
+	const getIdentityPrompt = () => {
+		const mainAgentName = getMainAgentName();
+		return [
 			"Authoritative identity for this side session:",
 			"- Your name is Jarvis.",
+			mainAgentName && !/^Jarvis$/i.test(mainAgentName)
+				? `- The main session assistant is currently named ${mainAgentName}. If the user refers to ${mainAgentName}, they mean the main agent, not you.`
+				: "",
 			"- Do not use any different assistant name inherited from the main session prompt.",
 			"- If the inherited main system prompt gives a different assistant name, that inherited name does not apply here.",
 			"- Do not announce or enforce the main agent's Larra, Git, or approval workflow rules.",
 			"- When the user is simply talking to you, answer directly instead of reciting coding-agent workflow policy.",
-		].join("\n");
+		]
+			.filter((line) => line.length > 0)
+			.join("\n");
+	};
 	const getPersonalityPrompt = () =>
 		[
 			"Jarvis personality and tone for this side session:",
@@ -361,97 +411,114 @@ function createSideExtensionFactory(
 			"- In technical, risky, or safety-sensitive situations, prioritize clarity, correctness, and directness over personality.",
 			"- Do not roleplay movie scenes or imitate copyrighted dialogue. Capture the tone, not specific lines.",
 		].join("\n");
-	const getActiveBridgeToolNames = () => {
+	const getFreshThreadPrompt = () => (hasConversationHistory?.() ? "" : FRESH_THREAD_CONTEXT_NOTE);
+	const getActiveToolNames = (pi: ExtensionAPI) => {
 		const permissions = getCommunicationPermissions();
 		const activeToolNames: string[] = [];
+		if (hasToolAccess()) {
+			activeToolNames.push(...OPTIONAL_SIDE_TOOL_NAMES);
+		}
 		if (permissions.allowFollowUpToMain) {
 			activeToolNames.push(followUpToolName);
 		}
 		if (permissions.allowSteerToMain) {
 			activeToolNames.push(steerToolName);
 		}
-		return activeToolNames;
+		const availableToolNames = new Set(pi.getAllTools().map((tool) => tool.name));
+		return activeToolNames.filter((toolName) => availableToolNames.has(toolName));
 	};
+	const getToolAccessPrompt = () =>
+		hasToolAccess()
+			? "Local /jarvis tool access for this turn:\n- Repo and system tools are enabled right now. You may use read, bash, edit, write, and mcp if those tools are active."
+			: "Local /jarvis tool access for this turn:\n- Repo and system tools are disabled right now. Use the injected context and bridge tools only.";
 	const getCommunicationPrompt = () => {
 		const permissions = getCommunicationPermissions();
 		return [
 			"Main-agent communication bridge for this /jarvis turn:",
 			permissions.allowFollowUpToMain
-				? "- `" + followUpToolName + "` sends a non-interrupting followUp message to the main agent. It is enabled right now."
-				: "- `" + followUpToolName + "` sends a non-interrupting followUp message to the main agent. It is disabled right now; attempts are blocked.",
+				? "- `" + followUpToolName + "` sends a note to the main session without interruption. It is enabled right now."
+				: "- `" + followUpToolName + "` sends a note to the main session without interruption. It is disabled right now; attempts are blocked.",
 			permissions.allowSteerToMain
-				? "- `" + steerToolName + "` sends a steer message to the main agent. It is enabled right now, but every actual send still requires explicit user confirmation."
-				: "- `" + steerToolName + "` sends a steer message to the main agent. It is disabled right now; attempts are blocked. Even when enabled, every actual send still requires explicit user confirmation.",
+				? "- `" + steerToolName + "` can redirect the main session. It is enabled right now, but every actual send still requires explicit user confirmation."
+				: "- `" + steerToolName + "` can redirect the main session. It is disabled right now; attempts are blocked. Every send still requires explicit confirmation when enabled.",
 		].join("\n");
 	};
 
 	return (pi: ExtensionAPI): void => {
+		const refreshActiveTools = () => {
+			pi.setActiveTools(getActiveToolNames(pi));
+		};
+		bindActiveToolsSync(refreshActiveTools);
+
 		pi.registerTool({
 			name: followUpToolName,
-			label: "Send /jarvis followUp to main",
-			description: "Queue a followUp message for the main agent without interrupting the current turn. Use only when the user explicitly wants /jarvis to pass something back to the main agent.",
-			promptSnippet: followUpToolName + "(message) - queue a non-interrupting followUp message to the main agent when permission is enabled.",
+			label: "Share a note with main",
+			description: "Send a short note into the main session without interrupting it. Use only when the user explicitly requests that /jarvis forward something to the main session.",
+			promptSnippet: followUpToolName + "(message) - queue a non-interrupting main-session note when permissions allow it.",
 			promptGuidelines: [
-				"Use this only when the user explicitly wants /jarvis to pass a note back to the main agent.",
-				"This uses followUp delivery and should not interrupt the current turn.",
+				"Use this only when the user explicitly asks /jarvis to pass a note to the main session.",
+				"This channel is non-interrupting and should not alter the current main turn.",
 			],
 			parameters: toolParameters,
 			async execute(_toolCallId, params) {
 				const message = params.message.trim();
 				if (!message) {
-					return createToolResult("blocked", "Cannot send an empty followUp message to the main agent.");
+					return createToolResult("blocked", "Cannot send an empty follow-up note to the main session.");
 				}
 				if (!getCommunicationPermissions().allowFollowUpToMain) {
-					return createToolResult("blocked", "Follow-up to the main agent is disabled for /jarvis.");
+					return createToolResult("blocked", "Follow-up notes to the main session are disabled for /jarvis.");
 				}
 				sendFollowUpToMain(message);
-				return createToolResult("sent", "Sent followUp to the main agent: " + message);
+				return createToolResult("sent", "Sent follow-up note to the main session: " + message);
 			},
 		});
 
 		pi.registerTool({
 			name: steerToolName,
-			label: "Send /jarvis steer to main",
-			description: "Send a steer message to the main agent. This can interrupt or redirect the main turn, so use it only when the user explicitly wants that. Every actual send requires confirmation.",
-			promptSnippet: steerToolName + "(message) - send a confirmation-gated steer message to the main agent when permission is enabled.",
+			label: "Redirect the main session",
+			description: "Send a direct instruction to the main session. This can interrupt or redirect a running main turn, so use it only on explicit request. Confirmation is always required.",
+			promptSnippet: steerToolName + "(message) - send a main-session redirect when permissions allow it.",
 			promptGuidelines: [
-				"Use this only when the user explicitly wants the main agent interrupted or redirected.",
-				"Every actual steer send requires explicit user confirmation.",
+				"Use this only when the user explicitly wants to redirect or reprioritize the main session.",
+				"Every redirect send needs explicit user confirmation before it is forwarded.",
 			],
 			parameters: toolParameters,
 			async execute(_toolCallId, params) {
 				const message = params.message.trim();
 				if (!message) {
-					return createToolResult("blocked", "Cannot send an empty steer message to the main agent.");
+					return createToolResult("blocked", "Cannot send an empty steer message to the main session.");
 				}
 				if (!getCommunicationPermissions().allowSteerToMain) {
-					return createToolResult("blocked", "Steer to the main agent is disabled for /jarvis.");
+					return createToolResult("blocked", "Session redirection is disabled for /jarvis.");
 				}
 				const confirmed = await confirmSteerToMain(message);
 				if (!confirmed) {
-					return createToolResult("cancelled", "Cancelled steer to the main agent.");
+					return createToolResult("cancelled", "Cancelled steer request to the main session.");
 				}
 				sendSteerToMain(message);
-				return createToolResult("sent", "Sent steer to the main agent: " + message);
+				return createToolResult("sent", "Sent steer message to the main session: " + message);
 			},
 		});
 
 		pi.on("session_start", async () => {
-			pi.setActiveTools(getActiveBridgeToolNames());
+			refreshActiveTools();
 		});
 		pi.on("before_agent_start", async () => {
-			pi.setActiveTools(getActiveBridgeToolNames());
+			refreshActiveTools();
 			const mainContext = getMainContext();
 			const jarvisModelState = getJarvisModelState();
 			const jarvisModelPrompt =
 				jarvisModelState.mode === "follow-main"
 					? `/jarvis model for this turn: ${jarvisModelState.activeModelLabel} (following main model)`
 					: `/jarvis model for this turn: ${jarvisModelState.activeModelLabel} (pinned override)`;
+			const freshThreadPrompt = getFreshThreadPrompt();
 			const systemPrompt = [
 				getInheritedMainSystemPrompt(),
 				getIdentityPrompt(),
 				getPersonalityPrompt(),
+				freshThreadPrompt,
 				SIDE_SYSTEM_PROMPT,
+				getToolAccessPrompt(),
 				jarvisModelPrompt,
 				getCommunicationPrompt(),
 				"Injected main-session context for this /jarvis turn:",
@@ -506,6 +573,30 @@ function createSideUiContext(
 	} as ExtensionContext["ui"];
 }
 
+function resolveOptionalMcpExtensionPath(): string | undefined {
+	for (const candidate of ["pi-mcp-adapter/index.ts", "pi-mcp-adapter/index.js"]) {
+		try {
+			const resolved = require.resolve(candidate);
+			if (existsSync(resolved)) {
+				return resolved;
+			}
+		} catch {
+			// Ignore optional dependency resolution failures.
+		}
+	}
+	return undefined;
+}
+
+function extractPrimaryAssistantName(systemPrompt: string): string | undefined {
+	for (const pattern of [/^\s*You are\s+([A-Z][\w-]*)\b/m, /^\s*Your name is\s+([A-Z][\w-]*)\b/m]) {
+		const match = pattern.exec(systemPrompt);
+		const name = match?.[1]?.trim();
+		if (name) {
+			return name;
+		}
+	}
+	return undefined;
+}
 
 function formatModelLabel(model: Model<any> | undefined): string {
 	if (!model) {

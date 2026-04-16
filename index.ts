@@ -31,6 +31,7 @@ type MainState = {
 	thinkingLevel?: string;
 	systemPrompt: string;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
+	allowSideTools: boolean;
 	allowFollowUpToMain: boolean;
 	allowSteerToMain: boolean;
 };
@@ -47,6 +48,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		themeProvider: () => {
 			throw new Error("/jarvis theme requested before UI was available.");
 		},
+		allowSideTools: false,
 		allowFollowUpToMain: false,
 		allowSteerToMain: false,
 	};
@@ -191,6 +193,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
 		state.jarvisModelSelection = { mode: "follow-main" };
+		state.allowSideTools = false;
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(ctx.model));
@@ -265,6 +268,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
 		state.jarvisModelSelection = { mode: "follow-main" };
+		state.allowSideTools = false;
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(state.model));
@@ -413,6 +417,10 @@ function queueMessage(state: MainState, message: string): void {
 }
 
 function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCommandContext): JarvisOverlayView {
+	const syncToolAccess = () => {
+		state.runtime?.setToolAccessEnabled(state.allowSideTools);
+	};
+
 	return {
 		isReady: () => state.runtime?.isReady() ?? false,
 		isStreaming: () => state.runtime?.isStreaming() ?? false,
@@ -420,14 +428,20 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 		getModelModeLabel: () => getJarvisModelModeLabel(state.jarvisModelSelection),
 		getMainStatusLabel: () => state.mainContext.summary.mainStatus,
 		getMainModelLabel: () => state.mainContext.summary.mainModelLabel,
+		isToolAccessEnabled: () => state.allowSideTools,
 		isFollowUpToMainEnabled: () => state.allowFollowUpToMain,
 		isSteerToMainEnabled: () => state.allowSteerToMain,
+		toggleToolAccess: () => {
+			state.allowSideTools = !state.allowSideTools;
+			syncToolAccess();
+		},
 		toggleFollowUpToMain: () => {
 			if (!isModelBridgeCompatible(getDesiredJarvisModel(state))) {
 				state.bridge.notify("Follow-up is not supported by the current /jarvis model.", "warning");
 				return;
 			}
 			state.allowFollowUpToMain = !state.allowFollowUpToMain;
+			syncToolAccess();
 		},
 		toggleSteerToMain: () => {
 			if (!isModelBridgeCompatible(getDesiredJarvisModel(state))) {
@@ -435,6 +449,7 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 				return;
 			}
 			state.allowSteerToMain = !state.allowSteerToMain;
+			syncToolAccess();
 		},
 		getDisplayEntries: () => getOverlayEntries(state),
 		sendMessage: async (text: string) => {
@@ -449,7 +464,15 @@ function getOverlayEntries(state: MainState): JarvisDisplayEntry[] {
 	if (state.runtime) {
 		entries = state.runtime.getDisplayEntries();
 	} else {
-		entries = [{ kind: "system", text: "Starting /jarvis side conversation…" }];
+		const hadSessionRef = Boolean(state.sessionRef?.file);
+		entries = [
+			{
+				kind: "system",
+				text: hadSessionRef
+					? "Connecting to your prior /jarvis conversation…"
+					: "Starting /jarvis side conversation…",
+			},
+		];
 		if (state.queuedMessages.length > 0) {
 			entries.push({ kind: "status", text: `Queued ${state.queuedMessages.length} message${state.queuedMessages.length === 1 ? "" : "s"}…` });
 		}
@@ -525,6 +548,7 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 			sessionFile,
 			systemPromptProvider: () => state.systemPrompt,
 			mainContextProvider: () => state.mainContext,
+			toolAccessProvider: () => state.allowSideTools,
 			communicationPermissionsProvider: () => ({
 				allowFollowUpToMain: state.allowFollowUpToMain,
 				allowSteerToMain: state.allowSteerToMain,

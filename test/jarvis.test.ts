@@ -95,6 +95,7 @@ type TestOverlayViewState = {
 	modelModeLabel: string;
 	displayEntries: ReturnType<JarvisOverlayView["getDisplayEntries"]>;
 	sentMessages: string[];
+	toolsEnabled: boolean;
 	followUpEnabled: boolean;
 	steerEnabled: boolean;
 };
@@ -112,6 +113,7 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		modelModeLabel: "follow main",
 		displayEntries: [{ kind: "assistant", text: "hello from /jarvis" }],
 		sentMessages: [],
+		toolsEnabled: false,
 		followUpEnabled: false,
 		steerEnabled: false,
 		...overrides,
@@ -124,8 +126,12 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		getModelModeLabel: () => state.modelModeLabel,
 		getMainStatusLabel: () => state.mainStatus,
 		getMainModelLabel: () => state.mainModelLabel,
+		isToolAccessEnabled: () => state.toolsEnabled,
 		isFollowUpToMainEnabled: () => state.followUpEnabled,
 		isSteerToMainEnabled: () => state.steerEnabled,
+		toggleToolAccess: () => {
+			state.toolsEnabled = !state.toolsEnabled;
+		},
 		toggleFollowUpToMain: () => {
 			state.followUpEnabled = !state.followUpEnabled;
 		},
@@ -226,23 +232,33 @@ async function testOverlayForwardingToggleControls(): Promise<void> {
 	overlay.focused = true;
 
 	let lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("Jarvis  Main: busy")), "overlay header should show the Jarvis title and current main status");
-	assert.ok(lines.some((line) => line.includes("Main model: openai/gpt-5.2")), "overlay header should show the current main model label");
-	assert.ok(lines.some((line) => line.includes("Jarvis model: faux/test-model (follow main)")), "overlay header should show the active Jarvis model and mode");
-	assert.ok(lines.some((line) => line.includes("Follow-up: off")), "overlay header should show the Follow-up toggle state");
+	assert.ok(lines.some((line) => line.includes("Jarvis  Main busy")), "overlay header should show the Jarvis title and current main status");
+	assert.ok(lines.some((line) => line.includes("Models: openai/gpt-5.2")), "overlay header should show the current main model label");
+	assert.ok(lines.some((line) => line.includes("faux/test-model (follow main)")), "overlay header should show the active Jarvis model and mode");
+	assert.ok(lines.some((line) => line.includes("Tools: off")), "overlay header should show the Tools toggle state");
+	assert.ok(lines.some((line) => line.includes("Share: off")), "overlay header should show the Share toggle state");
 	assert.ok(lines.some((line) => line.includes("Steer: off")), "overlay header should show the Steer toggle state");
 	assert.equal(cursorMarkerPresent(lines), true, "message input should be focused by default");
 
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
 	assert.equal(cursorMarkerPresent(lines), false, "tab should move focus from the message input to the first toggle");
-	assert.ok(lines.some((line) => line.includes("[Follow-up: off]")), "tab should focus the Follow-up toggle");
+	assert.ok(lines.some((line) => line.includes("[Tools: off]")), "tab should focus the Tools toggle");
 
 	overlay.handleInput(" ");
-	assert.equal(state.followUpEnabled, true, "space should toggle the focused Follow-up control");
+	assert.equal(state.toolsEnabled, true, "space should toggle the focused Tools control");
 	assert.deepEqual(state.sentMessages, [], "toggle controls should not send a chat message");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Follow-up: on]")), "overlay should render the updated Follow-up state");
+	assert.ok(lines.some((line) => line.includes("[Tools: on]")), "overlay should render the updated Tools state");
+
+	overlay.handleInput("\t");
+	lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("[Share: off]")), "tab should move focus to the Share toggle");
+
+	overlay.handleInput(" ");
+	assert.equal(state.followUpEnabled, true, "space should toggle the focused Share control");
+	lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("[Share: on]")), "overlay should render the updated Share state");
 
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
@@ -255,8 +271,13 @@ async function testOverlayForwardingToggleControls(): Promise<void> {
 
 	overlay.handleInput("\x1b[Z");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Follow-up: on]")), "shift+tab should move focus backward");
+	assert.ok(lines.some((line) => line.includes("[Share: on]")), "shift+tab should move focus backward");
 
+	overlay.handleInput("\x1b[Z");
+	lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("[Tools: on]")), "shift+tab should move focus back to the Tools toggle");
+
+	overlay.handleInput("\t");
 	overlay.handleInput("\t");
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
@@ -359,6 +380,7 @@ async function testSideSessionPersistence(): Promise<void> {
 				summaryText: "Main session summary:\n- Main status: idle",
 				recentText: "Recent main session: none",
 			}),
+			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => ({
 				allowFollowUpToMain: false,
 				allowSteerToMain: false,
@@ -380,6 +402,13 @@ async function testSideSessionPersistence(): Promise<void> {
 		}
 		rmSync(tempRoot, { recursive: true, force: true });
 	}
+}
+
+async function testSideSessionFreshWelcomeMessage(): Promise<void> {
+	await withSideSessionRuntime({}, async (runtime) => {
+		const entries = runtime.getDisplayEntries();
+		assert.ok(entries.some((entry) => entry.kind === "system" && entry.text.includes("Welcome to /jarvis. I’m ready to help directly")), "fresh /jarvis session should show a warm greeting message");
+	});
 }
 
 async function testSideSessionKeepsPendingUserPromptAndShowsThinking(): Promise<void> {
@@ -469,6 +498,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			sessionFile,
 			systemPromptProvider: () => mainSystemPrompt,
 			mainContextProvider: () => currentMainContext,
+			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => communicationPermissions,
 			sendFollowUpToMain: () => {},
 			confirmSteerToMain: async () => false,
@@ -498,6 +528,10 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		assert.ok(firstSystemPrompt.includes("Main session system prompt"), "/jarvis should inherit the non-identity portion of the main system prompt");
 		assert.ok(firstSystemPrompt.includes("Your name is Jarvis."), "/jarvis prompt should give the side assistant the Jarvis name");
 		assert.ok(
+			firstSystemPrompt.includes("The main session assistant is currently named Arria. If the user refers to Arria, they mean the main agent, not you."),
+			"/jarvis prompt should retain the detected main-agent name as reference-only context",
+		);
+		assert.ok(
 			firstSystemPrompt.includes("Do not use any different assistant name inherited from the main session prompt."),
 			"/jarvis prompt should explicitly forbid inherited alternate assistant names",
 		);
@@ -505,7 +539,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			firstSystemPrompt.includes("If the inherited main system prompt gives a different assistant name, that inherited name does not apply here."),
 			"/jarvis prompt should explicitly override conflicting inherited assistant names",
 		);
-		assert.ok(!firstSystemPrompt.includes("Arria"), "/jarvis prompt should strip the main assistant name from the inherited prompt");
+		assert.ok(!firstSystemPrompt.includes("If the user asks who you are, answer Arria."), "/jarvis prompt should strip inherited identity instructions for the main assistant");
 		assert.ok(
 			firstSystemPrompt.includes("Adopt the high-level demeanor of Tony Stark's JARVIS from the three Iron Man films"),
 			"/jarvis prompt should inject the requested JARVIS personality guidance",
@@ -523,7 +557,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			"/jarvis prompt should constrain the style layer to avoid mimicry and derailment",
 		);
 		assert.ok(firstSystemPrompt.includes("You are running inside /jarvis."), "/jarvis addendum should identify the side assistant role");
-		assert.ok(firstSystemPrompt.includes("You have no repo, system, or MCP tools in /jarvis."), "/jarvis addendum should remove repo/system/MCP tool authority");
+		assert.ok(firstSystemPrompt.includes("Repo and system tools are disabled right now."), "/jarvis prompt should describe disabled local tool access by default");
 		assert.ok(
 			firstSystemPrompt.includes("Communication permissions to the main agent via followUp / steer are controlled separately and may be enabled or disabled."),
 			"/jarvis addendum should describe separate followUp / steer permissions",
@@ -785,14 +819,15 @@ async function testOverlayInputSwallowedOnToggleFocus(): Promise<void> {
 
 	overlay.handleInput("\t");
 	let lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Follow-up: off]")), "tab should focus the Follow-up toggle");
+	assert.ok(lines.some((line) => line.includes("[Tools: off]")), "tab should focus the Tools toggle");
 
 	overlay.handleInput("a");
 	overlay.handleInput("b");
 	overlay.handleInput("c");
-	assert.equal(state.followUpEnabled, false, "text keys should not toggle the focused control");
+	assert.equal(state.toolsEnabled, false, "text keys should not toggle the focused control");
 	assert.deepEqual(state.sentMessages, [], "text keys must not be queued as messages while a toggle has focus");
 
+	overlay.handleInput("\t");
 	overlay.handleInput("\t");
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
@@ -994,6 +1029,7 @@ type SideRuntimeToolProbe = {
 
 async function withSideSessionRuntime(
 	overrides: {
+		toolAccessEnabled?: boolean;
 		communicationPermissions?: { allowFollowUpToMain: boolean; allowSteerToMain: boolean };
 		sendFollowUpToMain?: (message: string) => void;
 		confirmSteerToMain?: (message: string) => Promise<boolean>;
@@ -1027,6 +1063,7 @@ async function withSideSessionRuntime(
 				summaryText: "Main session summary:\n- Main status: idle",
 				recentText: "Recent main session: none",
 			}),
+			toolAccessProvider: () => overrides.toolAccessEnabled ?? false,
 			communicationPermissionsProvider: () => permissions,
 			sendFollowUpToMain: overrides.sendFollowUpToMain ?? (() => {}),
 			confirmSteerToMain: overrides.confirmSteerToMain ?? (async () => false),
@@ -1126,6 +1163,7 @@ class FakeExtensionAPI {
 
 class FakeJarvisRuntime {
 	syncModelCalls: Array<{ model: TestModel | undefined; thinkingLevel: string | undefined }> = [];
+	toolAccessCalls: boolean[] = [];
 
 	constructor(
 		public currentModel: TestModel | undefined,
@@ -1146,6 +1184,10 @@ class FakeJarvisRuntime {
 
 	getDisplayEntries(): ReturnType<JarvisOverlayView["getDisplayEntries"]> {
 		return [];
+	}
+
+	setToolAccessEnabled(enabled: boolean): void {
+		this.toolAccessCalls.push(enabled);
 	}
 
 	async sendMessage(): Promise<void> {}
@@ -1448,6 +1490,23 @@ async function testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime(): Pr
 	});
 }
 
+async function testJarvisOverlayToolToggleSyncsRuntime(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		let capturedComponent: any;
+		const originalCustom = harness.ctx.ui.custom;
+		(harness.ctx.ui as any).custom = async (fn: any, opts: any) => {
+			capturedComponent = fn({ requestRender: () => {}, terminal: { rows: 40 } }, harness.ctx.ui.theme, {}, () => {});
+			return originalCustom.call(harness.ctx.ui, fn, opts);
+		};
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.ok(capturedComponent, "should capture overlay component");
+		capturedComponent.handleInput("\t");
+		capturedComponent.handleInput(" ");
+		assert.deepEqual(runtime.toolAccessCalls, [true], "toggling Tools in the overlay should update the live /jarvis runtime");
+	});
+}
+
 async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): Promise<void> {
 	await withJarvisExtensionHarness(async (harness) => {
 		let capturedComponent: any;
@@ -1462,9 +1521,10 @@ async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): P
 
 		assert.ok(capturedComponent, "should capture overlay component");
 
-		// It's a JarvisOverlayComponent. Its `view` property is private, but we can call handleInput to toggle Follow-up.
+		// It's a JarvisOverlayComponent. Its `view` property is private, but we can still move focus to Share and toggle it.
 		// The default focus is "input".
-		capturedComponent.handleInput("\t"); // focus Follow-up
+		capturedComponent.handleInput("\t"); // focus Tools
+		capturedComponent.handleInput("\t"); // focus Share
 		capturedComponent.handleInput(" "); // toggle it ON
 
 		// Now switch model to incompatible
@@ -1532,6 +1592,16 @@ async function testSideSessionToolWhitelist(): Promise<void> {
 	});
 }
 
+async function testSideSessionLocalToolsActivateWhenPermitted(): Promise<void> {
+	await withSideSessionRuntime({ toolAccessEnabled: true }, async (_runtime, probe) => {
+		assert.ok(probe.session, "side session runtime should expose the underlying session");
+		const activeToolNames: string[] = probe.session!.getActiveToolNames().slice().sort();
+		for (const toolName of ["read", "bash", "edit", "write"]) {
+			assert.ok(activeToolNames.includes(toolName), `/jarvis should expose ${toolName} when local tool access is enabled`);
+		}
+	});
+}
+
 async function testSideSessionBridgeToolsActivateWhenPermitted(): Promise<void> {
 	await withSideSessionRuntime(
 		{ communicationPermissions: { allowFollowUpToMain: true, allowSteerToMain: true } },
@@ -1575,6 +1645,7 @@ async function testFollowUpToolPermissionGating(): Promise<void> {
 				summaryText: "Main session summary:\n- Main status: idle",
 				recentText: "Recent main session: none",
 			}),
+			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => permissionsState,
 			sendFollowUpToMain: (message) => {
 				sentFollowUp = message;
@@ -1646,6 +1717,7 @@ async function testSteerToolPermissionAndConfirmGating(): Promise<void> {
 				summaryText: "Main session summary:\n- Main status: idle",
 				recentText: "Recent main session: none",
 			}),
+			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => permissionsState,
 			sendFollowUpToMain: () => {},
 			confirmSteerToMain: async () => {
@@ -1853,6 +1925,7 @@ async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 				summaryText: "Main session summary:\n- Main status: idle",
 				recentText: "Recent main session: none",
 			}),
+			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => permissionsState,
 			sendFollowUpToMain: () => {},
 			confirmSteerToMain: (message: string) =>
@@ -1977,12 +2050,15 @@ async function main(): Promise<void> {
 	await testJarvisModelOverrideAndStateSeparation();
 	await testPinnedJarvisModelNotClobberedByMainModelSelect();
 	await testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime();
+	await testJarvisOverlayToolToggleSyncsRuntime();
 	await testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning();
 	await testJarvisModelReturnToFollowMainBehavior();
 	await testSideSessionPersistence();
+	await testSideSessionFreshWelcomeMessage();
 	await testSideSessionKeepsPendingUserPromptAndShowsThinking();
 	await testSideSessionUsesMainSystemPrompt();
 	await testSideSessionToolWhitelist();
+	await testSideSessionLocalToolsActivateWhenPermitted();
 	await testSideSessionBridgeToolsActivateWhenPermitted();
 	await testFollowUpToolPermissionGating();
 	await testSteerToolPermissionAndConfirmGating();

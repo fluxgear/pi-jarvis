@@ -13,8 +13,10 @@ export interface JarvisOverlayView {
 	getModelModeLabel(): string;
 	getMainStatusLabel(): string;
 	getMainModelLabel(): string;
+	isToolAccessEnabled(): boolean;
 	isFollowUpToMainEnabled(): boolean;
 	isSteerToMainEnabled(): boolean;
+	toggleToolAccess(): void;
 	toggleFollowUpToMain(): void;
 	toggleSteerToMain(): void;
 	getDisplayEntries(): JarvisDisplayEntry[];
@@ -22,9 +24,9 @@ export interface JarvisOverlayView {
 }
 
 type NotificationType = "info" | "warning" | "error";
-type OverlayFocusTarget = "input" | "followUp" | "steer";
+type OverlayFocusTarget = "input" | "tools" | "followUp" | "steer";
 
-const OVERLAY_FOCUS_ORDER: readonly OverlayFocusTarget[] = ["input", "followUp", "steer"];
+const OVERLAY_FOCUS_ORDER: readonly OverlayFocusTarget[] = ["input", "tools", "followUp", "steer"];
 
 interface NotificationItem {
 	message: string;
@@ -319,13 +321,24 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	private renderHeader(innerWidth: number): string[] {
 		const mainStatus = this.view.getMainStatusLabel();
 		const mainStatusColor = mainStatus === "busy" ? "warning" : "success";
-		const followUpToggle = this.renderToggle("Follow-up", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
+		const toolsToggle = this.renderToggle("Tools", this.view.isToolAccessEnabled(), this.focused && this.focusTarget === "tools");
+		const followUpToggle = this.renderToggle("Share", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
 		const steerToggle = this.renderToggle("Steer", this.view.isSteerToMainEnabled(), this.focused && this.focusTarget === "steer");
+		const mainModel = this.view.getMainModelLabel();
+		const sideModel = this.view.getModelLabel();
+		const modelMode = this.view.getModelModeLabel();
 		return [
-			truncateToWidth(`${this.theme.bold(this.theme.fg("accent", "Jarvis"))}  ${this.theme.fg("accent", "Main:")} ${this.theme.fg(mainStatusColor, mainStatus)}`, innerWidth),
-			truncateToWidth(this.theme.fg("muted", `Main model: ${this.view.getMainModelLabel()}`), innerWidth, "", true),
-			truncateToWidth(this.theme.fg("muted", `Jarvis model: ${this.view.getModelLabel()} (${this.view.getModelModeLabel()})`), innerWidth, "", true),
-			truncateToWidth(`${followUpToggle}  ${steerToggle}`, innerWidth, "", true),
+			truncateToWidth(
+				`${this.theme.bold(this.theme.fg("accent", "Jarvis"))}  ${this.theme.fg("accent", "Main")} ${this.theme.fg(mainStatusColor, mainStatus)}`,
+				innerWidth,
+			),
+			truncateToWidth(
+				`${this.theme.fg("muted", "Models:")} ${this.theme.fg("muted", `${mainModel}  /  ${sideModel} (${modelMode})`)}`,
+				innerWidth,
+				"",
+				true,
+			),
+			truncateToWidth(`${toolsToggle}  ${followUpToggle}  ${steerToggle}`, innerWidth, "", true),
 		];
 	}
 
@@ -334,8 +347,15 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		const displayEntries = this.view.getDisplayEntries();
 		const showAnimatedThinkingFallback = Boolean(snapshot.workingMessage && this.view.isStreaming());
 		this.syncThinkingAnimation(showAnimatedThinkingFallback);
+		let previousKind: JarvisDisplayEntry["kind"] | undefined;
 		for (const entry of displayEntries) {
+			if (
+				previousKind !== undefined && previousKind !== entry.kind && previousKind !== "system" && entry.kind !== "system"
+			) {
+				lines.push("");
+			}
 			lines.push(...this.renderEntry(entry, innerWidth));
+			previousKind = entry.kind;
 		}
 		if (showAnimatedThinkingFallback) {
 			lines.push(...this.renderAnimatedThinkingFallback(innerWidth, snapshot.workingMessage!));
@@ -397,6 +417,9 @@ export class JarvisOverlayComponent implements Component, Focusable {
 
 	private toggleFocusedControl(): void {
 		switch (this.focusTarget) {
+			case "tools":
+				this.view.toggleToolAccess();
+				break;
 			case "followUp":
 				this.view.toggleFollowUpToMain();
 				break;
@@ -455,10 +478,10 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	}
 
 	private wrapWithPrefix(prefix: string, text: string, innerWidth: number): string[] {
-		const indentWidth = Math.min(innerWidth - 1, Math.max(6, visibleWidth(prefix) + 1));
+		const indentWidth = Math.min(innerWidth - 1, Math.max(7, visibleWidth(prefix) + 2));
 		const wrapped = wrapTextWithAnsi(text || " ", Math.max(1, innerWidth - indentWidth));
 		return wrapped.map((line, index) => {
-			const label = index === 0 ? prefix : " ".repeat(Math.max(0, visibleWidth(prefix)));
+			const label = index === 0 ? prefix : " ".repeat(Math.max(0, visibleWidth(prefix) + 1));
 			return truncateToWidth(`${label} ${line}`, innerWidth, "", true);
 		});
 	}
