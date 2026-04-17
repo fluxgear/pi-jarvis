@@ -6,6 +6,45 @@ export const DEFAULT_MAIN_SESSION_RECENT_LIMIT = 8;
 const SUMMARY_TEXT_LIMIT = 240;
 const RECENT_ENTRY_TEXT_LIMIT = 320;
 const TOOL_CALL_TEXT_LIMIT = 72;
+const FILE_REFERENCE_LIMIT = 5;
+const KNOWN_FILE_EXTENSIONS = new Set([
+	"ts",
+	"tsx",
+	"js",
+	"jsx",
+	"mjs",
+	"cjs",
+	"json",
+	"md",
+	"yaml",
+	"yml",
+	"toml",
+	"sh",
+	"txt",
+	"css",
+	"html",
+	"xml",
+	"py",
+	"rb",
+	"go",
+	"rs",
+	"java",
+	"kt",
+	"swift",
+	"php",
+	"sql",
+	"lock",
+]);
+
+export type MainAttentionMode = "planning" | "reading" | "editing" | "validating" | "searching" | "waiting";
+
+export interface MainSessionWorkStatePayload {
+	attentionMode: MainAttentionMode;
+	currentAction: string;
+	primaryFile?: string;
+	activeFiles: readonly string[];
+	recentFiles: readonly string[];
+}
 
 export interface MainSessionSummaryPayload {
 	mainStatus: MainSessionSnapshot["busyState"];
@@ -18,6 +57,7 @@ export interface MainSessionSummaryPayload {
 	latestAssistantText?: string;
 	pendingMessages: boolean;
 	contextUsage?: MainSessionSnapshot["contextUsage"];
+	workState: MainSessionWorkStatePayload;
 }
 
 export interface MainSessionRecentEntry {
@@ -28,6 +68,7 @@ export interface MainSessionRecentEntry {
 export interface MainSessionContextPayload {
 	summary: MainSessionSummaryPayload;
 	summaryText: string;
+	workStateText: string;
 	recentEntries: readonly MainSessionRecentEntry[];
 	recentText: string;
 }
@@ -53,16 +94,22 @@ export function buildMainSessionContext(
 ): MainSessionContextPayload {
 	const summary = buildMainSessionSummary(snapshot);
 	const recentEntries = extractRecentMainSessionEntries(snapshot.branchEntries, limit);
+	const workStateText = formatWorkStateSummary(summary.workState);
 
 	return {
 		summary,
 		summaryText: formatMainSessionSummary(summary),
+		workStateText,
 		recentEntries,
 		recentText: formatRecentMainSessionEntries(recentEntries),
 	};
 }
 
-export function buildMainSessionSummary(snapshot: MainSessionSnapshot): MainSessionSummaryPayload {
+export function buildMainSessionSummary(
+	snapshot: MainSessionSnapshot,
+): MainSessionSummaryPayload {
+	const workState = deriveMainSessionWorkState(snapshot);
+
 	return {
 		mainStatus: snapshot.busyState,
 		mainModelLabel: snapshot.modelLabel,
@@ -78,6 +125,7 @@ export function buildMainSessionSummary(snapshot: MainSessionSnapshot): MainSess
 				...snapshot.contextUsage,
 			}
 			: undefined,
+		workState,
 	};
 }
 
@@ -87,6 +135,10 @@ export function formatMainSessionSummary(summary: MainSessionSummaryPayload): st
 		`- Main status: ${summary.mainStatus}`,
 		`- Model: ${summary.mainModelLabel}`,
 		`- Current tool activity: ${formatToolActivity(summary.currentToolActivity)}`,
+		`- Current focus: ${summary.workState.currentAction}`,
+		`- Attention mode: ${summary.workState.attentionMode}`,
+		`- Active files: ${formatFileList(summary.workState.activeFiles)}`,
+		`- Recent files: ${formatFileList(summary.workState.recentFiles)}`,
 		`- Latest user request: ${summary.latestUserRequest ?? "none"}`,
 		`- Latest assistant text: ${summary.latestAssistantText ?? "none"}`,
 		`- Pending messages: ${summary.pendingMessages ? "yes" : "no"}`,
@@ -117,6 +169,211 @@ export function formatRecentMainSessionEntries(entries: readonly MainSessionRece
 		"Recent main session:",
 		...entries.map((entry) => `- ${entry.kind}: ${entry.text}`),
 	].join("\n");
+}
+
+function formatWorkStateSummary(workState: MainSessionWorkStatePayload): string {
+	return [
+		"Main work state:",
+		`- Attention mode: ${workState.attentionMode}`,
+		`- Current focus: ${workState.currentAction}`,
+		`- Active files: ${formatFileList(workState.activeFiles)}`,
+		`- Recent files: ${formatFileList(workState.recentFiles)}`,
+	].join("\n");
+}
+
+function deriveMainSessionWorkState(snapshot: MainSessionSnapshot): MainSessionWorkStatePayload {
+	const activeFiles = extractActiveFiles(snapshot.toolExecution.running);
+	const recentFiles = extractRecentFiles(snapshot.branchEntries, activeFiles);
+	const primaryFile = activeFiles[0] ?? recentFiles[0];
+	const validationCommand = getActiveValidationCommand(snapshot.toolExecution.running);
+
+	if (validationCommand) {
+		return {
+			attentionMode: "validating",
+			currentAction: `running ${validationCommand}`,
+			primaryFile,
+			activeFiles,
+			recentFiles,
+		};
+	}
+
+	if (snapshot.toolExecution.running.some((toolCall) => toolCall.toolName === "edit" || toolCall.toolName === "write")) {
+		return {
+			attentionMode: "editing",
+			currentAction: primaryFile ? `editing ${primaryFile}` : "editing the workspace",
+			primaryFile,
+			activeFiles,
+			recentFiles,
+		};
+	}
+
+	if (snapshot.toolExecution.running.some((toolCall) => toolCall.toolName === "read")) {
+		return {
+			attentionMode: "reading",
+			currentAction: primaryFile ? `reading ${primaryFile}` : "reading the workspace",
+			primaryFile,
+			activeFiles,
+			recentFiles,
+		};
+	}
+
+	if (snapshot.toolExecution.running.some((toolCall) => ["grep", "find", "ls", "mcp"].includes(toolCall.toolName))) {
+		return {
+			attentionMode: "searching",
+			currentAction: primaryFile ? `searching around ${primaryFile}` : "searching the workspace",
+			primaryFile,
+			activeFiles,
+			recentFiles,
+		};
+	}
+
+	if (snapshot.busyState === "busy") {
+		return {
+			attentionMode: "planning",
+			currentAction: primaryFile ? `planning around ${primaryFile}` : "planning the next step",
+			primaryFile,
+			activeFiles,
+			recentFiles,
+		};
+	}
+
+	return {
+		attentionMode: "waiting",
+		currentAction: snapshot.hasPendingMessages ? "waiting on queued messages" : "waiting for user input",
+		primaryFile,
+		activeFiles,
+		recentFiles,
+	};
+}
+
+function extractActiveFiles(runningToolCalls: readonly MainSessionSnapshot["toolExecution"]["running"][number][]): string[] {
+	const files = new Set<string>();
+	for (const toolCall of runningToolCalls) {
+		for (const file of extractFilesFromToolCall(toolCall)) {
+			files.add(file);
+			if (files.size >= FILE_REFERENCE_LIMIT) {
+				return [...files];
+			}
+		}
+	}
+	return [...files];
+}
+
+function extractRecentFiles(branchEntries: MainSessionSnapshot["branchEntries"], activeFiles: readonly string[]): string[] {
+	const files = new Set<string>(activeFiles);
+	const boundedEntries = getEntriesAfterLatestCompaction(branchEntries);
+	for (let i = boundedEntries.length - 1; i >= 0; i--) {
+		for (const file of extractFilesFromSessionEntry(boundedEntries[i]!)) {
+			files.add(file);
+			if (files.size >= FILE_REFERENCE_LIMIT) {
+				return [...files];
+			}
+		}
+	}
+	return [...files];
+}
+
+function getActiveValidationCommand(runningToolCalls: readonly MainSessionSnapshot["toolExecution"]["running"][number][]): string | undefined {
+	for (const toolCall of runningToolCalls) {
+		if (toolCall.toolName !== "bash") {
+			continue;
+		}
+		const command = typeof toolCall.args?.command === "string" ? normalizeText(toolCall.args.command) : "";
+		if (command === "npm run check" || command === "npm test" || command === "npm run build") {
+			return command;
+		}
+	}
+	return undefined;
+}
+
+function extractFilesFromSessionEntry(entry: SessionEntry): string[] {
+	if (entry.type !== "message") {
+		return [];
+	}
+
+	switch (entry.message.role) {
+		case "assistant":
+			return extractToolCalls(entry.message.content).flatMap((toolCall) => extractFilesFromToolCall({ toolName: toolCall.name, args: toolCall.arguments }));
+		case "bashExecution":
+			return extractFileReferencesFromText(entry.message.command);
+		default:
+			return [];
+	}
+}
+
+function extractFilesFromToolCall(toolCall: { toolName: string; args?: Record<string, unknown> }): string[] {
+	if (toolCall.toolName === "bash") {
+		return extractFileReferencesFromText(typeof toolCall.args?.command === "string" ? toolCall.args.command : "");
+	}
+
+	const files = new Set<string>();
+	collectFileReferences(toolCall.args, files);
+	return [...files];
+}
+
+function collectFileReferences(value: unknown, files: Set<string>, depth: number = 0): void {
+	if (depth > 3 || files.size >= FILE_REFERENCE_LIMIT || value === null || typeof value === "undefined") {
+		return;
+	}
+
+	if (typeof value === "string") {
+		for (const file of extractFileReferencesFromText(value)) {
+			files.add(file);
+			if (files.size >= FILE_REFERENCE_LIMIT) {
+				return;
+			}
+		}
+		return;
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			collectFileReferences(item, files, depth + 1);
+			if (files.size >= FILE_REFERENCE_LIMIT) {
+				return;
+			}
+		}
+		return;
+	}
+
+	if (!isRecord(value)) {
+		return;
+	}
+
+	for (const nestedValue of Object.values(value)) {
+		collectFileReferences(nestedValue, files, depth + 1);
+		if (files.size >= FILE_REFERENCE_LIMIT) {
+			return;
+		}
+	}
+}
+
+function extractFileReferencesFromText(text: string): string[] {
+	const matches = text.match(/(?:^|[\s"'`=:(])((?:\.{1,2}\/|\/)?[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]{1,10})(?=$|[\s"'`):,])/g) ?? [];
+	const files = new Set<string>();
+	for (const match of matches) {
+		const normalized = normalizeFileReference(match);
+		if (normalized) {
+			files.add(normalized);
+		}
+	}
+	return [...files];
+}
+
+function normalizeFileReference(value: string): string | undefined {
+	const trimmed = value.trim().replace(/^["'`(=:]+|["'`),:;]+$/g, "");
+	if (!trimmed || trimmed.includes("://") || trimmed.endsWith("/")) {
+		return undefined;
+	}
+	const extension = trimmed.split(".").at(-1)?.toLowerCase();
+	if (!extension || !KNOWN_FILE_EXTENSIONS.has(extension)) {
+		return undefined;
+	}
+	return trimmed;
+}
+
+function formatFileList(files: readonly string[]): string {
+	return files.length > 0 ? files.join(", ") : "none";
 }
 
 function normalizeSummaryField(value: string | undefined): string | undefined {

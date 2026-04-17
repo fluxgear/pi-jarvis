@@ -91,6 +91,7 @@ type TestOverlayViewState = {
 	streaming: boolean;
 	mainStatus: string;
 	mainModelLabel: string;
+	mainFocusLabel: string;
 	modelLabel: string;
 	modelModeLabel: string;
 	displayEntries: ReturnType<JarvisOverlayView["getDisplayEntries"]>;
@@ -109,6 +110,7 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		streaming: false,
 		mainStatus: "idle",
 		mainModelLabel: "openai/gpt-5.2",
+		mainFocusLabel: "waiting for user input",
 		modelLabel: "faux/test-model",
 		modelModeLabel: "follow main",
 		displayEntries: [{ kind: "assistant", text: "hello from /jarvis" }],
@@ -126,6 +128,7 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		getModelModeLabel: () => state.modelModeLabel,
 		getMainStatusLabel: () => state.mainStatus,
 		getMainModelLabel: () => state.mainModelLabel,
+		getMainFocusLabel: () => state.mainFocusLabel,
 		isToolAccessEnabled: () => state.toolsEnabled,
 		isFollowUpToMainEnabled: () => state.followUpEnabled,
 		isSteerToMainEnabled: () => state.steerEnabled,
@@ -227,13 +230,14 @@ async function testOverlayForwardingToggleControls(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
 	const bridge = new JarvisOverlayBridge();
-	const { state, view } = createTestOverlayView({ mainStatus: "busy" });
+	const { state, view } = createTestOverlayView({ mainStatus: "busy", mainFocusLabel: "editing side-session.ts" });
 	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
 	overlay.focused = true;
 
 	let lines = overlay.render(80);
 	assert.ok(lines.some((line) => line.includes("Jarvis  Main busy")), "overlay header should show the Jarvis title and current main status");
 	assert.ok(lines.some((line) => line.includes("Models: openai/gpt-5.2")), "overlay header should show the current main model label");
+	assert.ok(lines.some((line) => line.includes("Focus: editing side-session.ts")), "overlay header should show the current main-session focus");
 	assert.ok(lines.some((line) => line.includes("faux/test-model (follow main)")), "overlay header should show the active Jarvis model and mode");
 	assert.ok(lines.some((line) => line.includes("Tools: off")), "overlay header should show the Tools toggle state");
 	assert.ok(lines.some((line) => line.includes("Share: off")), "overlay header should show the Share toggle state");

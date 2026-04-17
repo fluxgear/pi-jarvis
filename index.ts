@@ -428,6 +428,7 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 		getModelModeLabel: () => getJarvisModelModeLabel(state.jarvisModelSelection),
 		getMainStatusLabel: () => state.mainContext.summary.mainStatus,
 		getMainModelLabel: () => state.mainContext.summary.mainModelLabel,
+		getMainFocusLabel: () => state.mainContext.summary.workState.currentAction,
 		isToolAccessEnabled: () => state.allowSideTools,
 		isFollowUpToMainEnabled: () => state.allowFollowUpToMain,
 		isSteerToMainEnabled: () => state.allowSteerToMain,

@@ -13,6 +13,7 @@ export interface JarvisOverlayView {
 	getModelModeLabel(): string;
 	getMainStatusLabel(): string;
 	getMainModelLabel(): string;
+	getMainFocusLabel(): string;
 	isToolAccessEnabled(): boolean;
 	isFollowUpToMainEnabled(): boolean;
 	isSteerToMainEnabled(): boolean;
@@ -327,6 +328,7 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		const mainModel = this.view.getMainModelLabel();
 		const sideModel = this.view.getModelLabel();
 		const modelMode = this.view.getModelModeLabel();
+		const focus = this.view.getMainFocusLabel();
 		return [
 			truncateToWidth(
 				`${this.theme.bold(this.theme.fg("accent", "Jarvis"))}  ${this.theme.fg("accent", "Main")} ${this.theme.fg(mainStatusColor, mainStatus)}`,
@@ -338,6 +340,7 @@ export class JarvisOverlayComponent implements Component, Focusable {
 				"",
 				true,
 			),
+			truncateToWidth(this.theme.fg("muted", `Focus: ${focus}`), innerWidth, "", true),
 			truncateToWidth(`${toolsToggle}  ${followUpToggle}  ${steerToggle}`, innerWidth, "", true),
 		];
 	}
