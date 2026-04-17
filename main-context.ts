@@ -46,6 +46,16 @@ export interface MainSessionWorkStatePayload {
 	recentFiles: readonly string[];
 }
 
+export type MainValidationStatus = "running" | "passed" | "failed" | "none";
+
+export interface MainSessionValidationPayload {
+	status: MainValidationStatus;
+	command?: string;
+	summary: string;
+	outputSnippet?: string;
+	exitCode?: number;
+}
+
 export interface MainSessionSummaryPayload {
 	mainStatus: MainSessionSnapshot["busyState"];
 	mainModelLabel: string;
@@ -58,6 +68,7 @@ export interface MainSessionSummaryPayload {
 	pendingMessages: boolean;
 	contextUsage?: MainSessionSnapshot["contextUsage"];
 	workState: MainSessionWorkStatePayload;
+	validation: MainSessionValidationPayload;
 }
 
 export interface MainSessionRecentEntry {
@@ -74,6 +85,9 @@ export interface MainSessionContextPayload {
 }
 
 type MessageEntry = Extract<SessionEntry, { type: "message" }>;
+type BashExecutionEntry = Extract<SessionEntry, { type: "message" }> & {
+	message: Extract<MessageEntry["message"], { role: "bashExecution" }>;
+};
 type TextBlockLike = {
 	type: "text";
 	text: string;
@@ -109,6 +123,7 @@ export function buildMainSessionSummary(
 	snapshot: MainSessionSnapshot,
 ): MainSessionSummaryPayload {
 	const workState = deriveMainSessionWorkState(snapshot);
+	const validation = deriveValidationState(snapshot);
 
 	return {
 		mainStatus: snapshot.busyState,
@@ -126,6 +141,7 @@ export function buildMainSessionSummary(
 			}
 			: undefined,
 		workState,
+		validation,
 	};
 }
 
@@ -139,6 +155,7 @@ export function formatMainSessionSummary(summary: MainSessionSummaryPayload): st
 		`- Attention mode: ${summary.workState.attentionMode}`,
 		`- Active files: ${formatFileList(summary.workState.activeFiles)}`,
 		`- Recent files: ${formatFileList(summary.workState.recentFiles)}`,
+		`- Validation: ${summary.validation.summary}`,
 		`- Latest user request: ${summary.latestUserRequest ?? "none"}`,
 		`- Latest assistant text: ${summary.latestAssistantText ?? "none"}`,
 		`- Pending messages: ${summary.pendingMessages ? "yes" : "no"}`,
@@ -169,6 +186,71 @@ export function formatRecentMainSessionEntries(entries: readonly MainSessionRece
 		"Recent main session:",
 		...entries.map((entry) => `- ${entry.kind}: ${entry.text}`),
 	].join("\n");
+}
+
+function deriveValidationState(snapshot: MainSessionSnapshot): MainSessionValidationPayload {
+	const runningCommand = getActiveValidationCommand(snapshot.toolExecution.running);
+	if (runningCommand) {
+		return {
+			status: "running",
+			command: runningCommand,
+			summary: `${runningCommand} is running`,
+		};
+	}
+
+	const latestValidationEntry = findLatestValidationEntry(snapshot.branchEntries);
+	if (!latestValidationEntry) {
+		return {
+			status: "none",
+			summary: "none",
+		};
+	}
+
+	const command = normalizeText(latestValidationEntry.message.command);
+	const outputSnippet = normalizeSummaryField(latestValidationEntry.message.output);
+	if (latestValidationEntry.message.cancelled) {
+		return {
+			status: "failed",
+			command,
+			summary: `${command} was cancelled`,
+			outputSnippet,
+		};
+	}
+
+	if (latestValidationEntry.message.exitCode === 0) {
+		return {
+			status: "passed",
+			command,
+			summary: `${command} passed`,
+			outputSnippet,
+			exitCode: 0,
+		};
+	}
+
+	const exitCode = latestValidationEntry.message.exitCode ?? undefined;
+	const suffix = outputSnippet ? ` — ${outputSnippet}` : "";
+	return {
+		status: "failed",
+		command,
+		summary: `${command} failed${exitCode === undefined ? "" : ` (exit ${exitCode})`}${suffix}`,
+		outputSnippet,
+		exitCode,
+	};
+}
+
+function findLatestValidationEntry(branchEntries: MainSessionSnapshot["branchEntries"]): BashExecutionEntry | undefined {
+	const boundedEntries = getEntriesAfterLatestCompaction(branchEntries);
+	for (let i = boundedEntries.length - 1; i >= 0; i--) {
+		const entry = boundedEntries[i];
+		if (entry?.type !== "message" || entry.message.role !== "bashExecution") {
+			continue;
+		}
+		const command = normalizeText(entry.message.command);
+		if (command === "npm run check" || command === "npm test" || command === "npm run build") {
+			return entry as BashExecutionEntry;
+		}
+	}
+	return undefined;
 }
 
 function formatWorkStateSummary(workState: MainSessionWorkStatePayload): string {

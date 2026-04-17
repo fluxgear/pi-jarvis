@@ -154,6 +154,20 @@ function flushTicks(): Promise<void> {
 	return new Promise((resolve) => process.nextTick(resolve));
 }
 
+function createMinimalMainContextPayload() {
+	return buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: undefined,
+		latestAssistantText: undefined,
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [],
+	});
+}
+
 async function testSessionRef(): Promise<void> {
 	const ref = createJarvisSessionRef("/tmp/jarvis.jsonl");
 	const loaded = readJarvisSessionRef([
@@ -380,10 +394,7 @@ async function testSideSessionPersistence(): Promise<void> {
 			thinkingLevel: undefined,
 			sessionFile,
 			systemPromptProvider: () => "main session prompt",
-			mainContextProvider: () => ({
-				summaryText: "Main session summary:\n- Main status: idle",
-				recentText: "Recent main session: none",
-			}),
+			mainContextProvider: () => createMinimalMainContextPayload(),
 			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => ({
 				allowFollowUpToMain: false,
@@ -573,6 +584,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			"/jarvis prompt should describe disabled bridge permissions",
 		);
 		assert.ok(!firstSystemPrompt.includes("jarvis_request_write_access"), "/jarvis prompt should not reference the removed mutation approval tool");
+		assert.ok(firstSystemPrompt.includes(currentMainContext.workStateText), "/jarvis prompt should inject the current main-session work-state summary");
 		assert.ok(firstSystemPrompt.includes(currentMainContext.summaryText), "/jarvis prompt should inject the current main-session summary");
 		assert.ok(firstSystemPrompt.includes(currentMainContext.recentText), "/jarvis prompt should inject the current recent main-session window");
 
@@ -583,6 +595,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		};
 		const secondResult = await extensionRunner.emitBeforeAgentStart("check prompt again", undefined, "fallback prompt");
 		const secondSystemPrompt = secondResult?.systemPrompt ?? "";
+		assert.ok(secondSystemPrompt.includes(currentMainContext.workStateText), "/jarvis prompt should refresh the injected work-state summary for each turn");
 		assert.ok(secondSystemPrompt.includes(currentMainContext.summaryText), "/jarvis prompt should refresh the injected main-session summary for each turn");
 		assert.ok(secondSystemPrompt.includes(currentMainContext.recentText), "/jarvis prompt should refresh the injected recent main-session window for each turn");
 		assert.ok(!secondSystemPrompt.includes("FIRST_MAIN_REQUEST"), "/jarvis should not keep stale startup context in later turns");
@@ -797,6 +810,15 @@ async function testBuildMainSessionContext(): Promise<void> {
 	assert.equal(context.summary.mainModelLabel, "openai/gpt-5.2");
 	assert.equal(context.summary.currentToolActivity.active, true);
 	assert.equal(context.summary.currentToolActivity.running.length, 2);
+	assert.equal(context.summary.workState.attentionMode, "reading");
+	assert.equal(context.summary.workState.currentAction, "reading index.ts");
+	assert.equal(context.summary.workState.primaryFile, "index.ts");
+	assert.deepEqual(context.summary.workState.activeFiles, ["index.ts"]);
+	assert.deepEqual(context.summary.workState.recentFiles, ["index.ts"]);
+	assert.equal(context.summary.validation.status, "passed");
+	assert.equal(context.summary.validation.command, "npm run check");
+	assert.equal(context.summary.validation.summary, "npm run check passed");
+	assert.equal(context.summary.validation.outputSnippet, "lint clean");
 	assert.equal(context.summary.latestUserRequest, "Investigate the /jarvis context window");
 	assert.equal(context.summary.latestAssistantText, "Summarizing the main session state.");
 	assert.equal(context.summary.pendingMessages, true);
@@ -805,12 +827,48 @@ async function testBuildMainSessionContext(): Promise<void> {
 	assert.equal(context.recentEntries[0]?.text, "Reviewing index.ts");
 	assert.ok(context.summaryText.includes("Main session summary:"));
 	assert.ok(context.summaryText.includes("Current tool activity: read {\"path\":\"index.ts\"}, mcp search main context"));
+	assert.ok(context.summaryText.includes("Current focus: reading index.ts"));
+	assert.ok(context.summaryText.includes("Attention mode: reading"));
+	assert.ok(context.summaryText.includes("Active files: index.ts"));
+	assert.ok(context.summaryText.includes("Recent files: index.ts"));
+	assert.ok(context.summaryText.includes("Validation: npm run check passed"));
 	assert.ok(context.summaryText.includes("Pending messages: yes"));
 	assert.ok(context.summaryText.includes("Context usage: 2048/128000 tokens (1.6%)"));
+	assert.ok(context.workStateText.includes("Main work state:"));
+	assert.ok(context.workStateText.includes("Current focus: reading index.ts"));
 	assert.ok(!context.recentText.includes("pre-compaction chatter"), "recent window should skip entries before the latest compaction boundary");
 	assert.ok(!context.recentText.includes("hidden internal status"), "recent window should skip hidden custom messages");
 	assert.ok(context.recentText.includes("Branch summary: branched away to inspect an alternate fix"));
 	assert.ok(context.recentText.includes("$ npm run check (ok) — lint clean"));
+
+	const validationContext = buildMainSessionContext({
+		busyState: "busy",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: {
+			active: true,
+			running: [
+				{ toolName: "bash", args: { command: "npm test" } },
+				{ toolName: "read", args: { path: "test/jarvis.test.ts" } },
+			],
+		},
+		latestUserRequest: "Run the regression suite",
+		latestAssistantText: "Starting validation.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [],
+	});
+
+	assert.equal(validationContext.summary.workState.attentionMode, "validating");
+	assert.equal(validationContext.summary.workState.currentAction, "running npm test");
+	assert.equal(validationContext.summary.workState.primaryFile, "test/jarvis.test.ts");
+	assert.deepEqual(validationContext.summary.workState.activeFiles, ["test/jarvis.test.ts"]);
+	assert.equal(validationContext.summary.validation.status, "running");
+	assert.equal(validationContext.summary.validation.command, "npm test");
+	assert.equal(validationContext.summary.validation.summary, "npm test is running");
+	assert.ok(validationContext.summaryText.includes("Current focus: running npm test"));
+	assert.ok(validationContext.summaryText.includes("Attention mode: validating"));
+	assert.ok(validationContext.summaryText.includes("Validation: npm test is running"));
 }
 
 async function testOverlayInputSwallowedOnToggleFocus(): Promise<void> {
@@ -1063,10 +1121,7 @@ async function withSideSessionRuntime(
 			thinkingLevel: undefined,
 			sessionFile,
 			systemPromptProvider: () => "main session prompt",
-			mainContextProvider: () => ({
-				summaryText: "Main session summary:\n- Main status: idle",
-				recentText: "Recent main session: none",
-			}),
+			mainContextProvider: () => createMinimalMainContextPayload(),
 			toolAccessProvider: () => overrides.toolAccessEnabled ?? false,
 			communicationPermissionsProvider: () => permissions,
 			sendFollowUpToMain: overrides.sendFollowUpToMain ?? (() => {}),
@@ -1645,10 +1700,7 @@ async function testFollowUpToolPermissionGating(): Promise<void> {
 			thinkingLevel: undefined,
 			sessionFile,
 			systemPromptProvider: () => "main session prompt",
-			mainContextProvider: () => ({
-				summaryText: "Main session summary:\n- Main status: idle",
-				recentText: "Recent main session: none",
-			}),
+			mainContextProvider: () => createMinimalMainContextPayload(),
 			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => permissionsState,
 			sendFollowUpToMain: (message) => {
@@ -1717,10 +1769,7 @@ async function testSteerToolPermissionAndConfirmGating(): Promise<void> {
 			thinkingLevel: undefined,
 			sessionFile,
 			systemPromptProvider: () => "main session prompt",
-			mainContextProvider: () => ({
-				summaryText: "Main session summary:\n- Main status: idle",
-				recentText: "Recent main session: none",
-			}),
+			mainContextProvider: () => createMinimalMainContextPayload(),
 			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => permissionsState,
 			sendFollowUpToMain: () => {},
@@ -1925,10 +1974,7 @@ async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 			thinkingLevel: undefined,
 			sessionFile,
 			systemPromptProvider: () => "main session prompt",
-			mainContextProvider: () => ({
-				summaryText: "Main session summary:\n- Main status: idle",
-				recentText: "Recent main session: none",
-			}),
+			mainContextProvider: () => createMinimalMainContextPayload(),
 			toolAccessProvider: () => false,
 			communicationPermissionsProvider: () => permissionsState,
 			sendFollowUpToMain: () => {},

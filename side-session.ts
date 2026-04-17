@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { AssistantMessage, Model } from "@mariozechner/pi-ai";
+import type { MainSessionContextPayload } from "./main-context.js";
 import { Type } from "@mariozechner/pi-ai";
 import {
 	DefaultResourceLoader,
@@ -39,10 +40,7 @@ type SideRuntimeCreateOptions = {
 	thinkingLevel: string | undefined;
 	sessionFile: string;
 	systemPromptProvider: () => string;
-	mainContextProvider: () => {
-		summaryText: string;
-		recentText: string;
-	};
+	mainContextProvider: () => MainSessionContextPayload;
 	toolAccessProvider: () => boolean;
 	communicationPermissionsProvider: () => {
 		allowFollowUpToMain: boolean;
@@ -522,6 +520,7 @@ function createSideExtensionFactory(
 				jarvisModelPrompt,
 				getCommunicationPrompt(),
 				"Injected main-session context for this /jarvis turn:",
+				mainContext.workStateText.trim(),
 				mainContext.summaryText.trim(),
 				mainContext.recentText.trim(),
 			]
