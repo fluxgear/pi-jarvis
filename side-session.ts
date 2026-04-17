@@ -83,6 +83,7 @@ export class JarvisSideSessionRuntime {
 	private modelLabel = "model unavailable";
 	private hasConversationHistory = false;
 	private toolAccessEnabled = false;
+	private mcpAvailable = false;
 	private syncActiveTools?: () => void;
 
 	private constructor(
@@ -108,6 +109,13 @@ export class JarvisSideSessionRuntime {
 
 	getModelLabel(): string {
 		return this.modelLabel;
+	}
+
+	getRepoToolsDetailLabel(): string {
+		if (!this.toolAccessEnabled) {
+			return "repo tools off";
+		}
+		return this.mcpAvailable ? "local tools + MCP available" : "local tools only (MCP unavailable)";
 	}
 
 	setToolAccessEnabled(enabled: boolean): void {
@@ -198,6 +206,7 @@ export class JarvisSideSessionRuntime {
 		this.toolAccessEnabled = options.toolAccessProvider();
 		const hasConversationHistory = () => this.hasConversationHistory || (options.hasConversationHistory?.() ?? false);
 		const mcpExtensionPath = resolveOptionalMcpExtensionPath();
+		this.mcpAvailable = Boolean(mcpExtensionPath);
 
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: options.cwd,
@@ -337,6 +346,7 @@ function createSideExtensionFactory(
 	sendSteerToMain: SideRuntimeCreateOptions["sendSteerToMain"],
 	hasConversationHistory?: SideRuntimeCreateOptions["hasConversationHistory"],
 ) {
+	let previousMainContext: MainSessionContextPayload | undefined;
 	const followUpToolName = "jarvis_send_follow_up_to_main";
 	const steerToolName = "jarvis_send_steer_to_main";
 	const stripInheritedSections = (text: string, headingsToStrip: ReadonlySet<string>): string => {
@@ -441,6 +451,41 @@ function createSideExtensionFactory(
 				: "- `" + steerToolName + "` can redirect the main session. It is disabled right now; attempts are blocked. Every send still requires explicit confirmation when enabled.",
 		].join("\n");
 	};
+	const formatChangesSinceLastTurn = (currentMainContext: MainSessionContextPayload): string => {
+		if (!previousMainContext) {
+			return [
+				"Changes since the last /jarvis turn:",
+				"- none yet in this side session",
+			].join("\n");
+		}
+
+		const changes: string[] = [];
+		if (currentMainContext.summary.mainModelLabel !== previousMainContext.summary.mainModelLabel) {
+			changes.push(`- Main model changed: ${previousMainContext.summary.mainModelLabel} -> ${currentMainContext.summary.mainModelLabel}`);
+		}
+		if (currentMainContext.summary.mainStatus !== previousMainContext.summary.mainStatus) {
+			changes.push(`- Main status changed: ${previousMainContext.summary.mainStatus} -> ${currentMainContext.summary.mainStatus}`);
+		}
+		if (currentMainContext.summary.workState.currentAction !== previousMainContext.summary.workState.currentAction) {
+			changes.push(`- Focus changed: ${previousMainContext.summary.workState.currentAction} -> ${currentMainContext.summary.workState.currentAction}`);
+		}
+		if (currentMainContext.summary.validation.summary !== previousMainContext.summary.validation.summary) {
+			changes.push(`- Validation changed: ${currentMainContext.summary.validation.summary}`);
+		}
+		const previousFiles = new Set(previousMainContext.summary.workState.recentFiles);
+		const newFiles = currentMainContext.summary.workState.recentFiles.filter((file) => !previousFiles.has(file));
+		if (newFiles.length > 0) {
+			changes.push(`- New files in focus: ${newFiles.join(", ")}`);
+		}
+		if (currentMainContext.summary.latestUserRequest && currentMainContext.summary.latestUserRequest !== previousMainContext.summary.latestUserRequest) {
+			changes.push(`- New main request: ${currentMainContext.summary.latestUserRequest}`);
+		}
+
+		return [
+			"Changes since the last /jarvis turn:",
+			...(changes.length > 0 ? changes : ["- no significant change since the last /jarvis turn"]),
+		].join("\n");
+	};
 
 	return (pi: ExtensionAPI): void => {
 		const refreshActiveTools = () => {
@@ -504,6 +549,7 @@ function createSideExtensionFactory(
 		pi.on("before_agent_start", async () => {
 			refreshActiveTools();
 			const mainContext = getMainContext();
+			const changesSinceLastTurnText = formatChangesSinceLastTurn(mainContext);
 			const jarvisModelState = getJarvisModelState();
 			const jarvisModelPrompt =
 				jarvisModelState.mode === "follow-main"
@@ -521,11 +567,13 @@ function createSideExtensionFactory(
 				getCommunicationPrompt(),
 				"Injected main-session context for this /jarvis turn:",
 				mainContext.workStateText.trim(),
+				changesSinceLastTurnText,
 				mainContext.summaryText.trim(),
 				mainContext.recentText.trim(),
 			]
 				.filter((section) => section.length > 0)
 				.join("\n\n");
+			previousMainContext = mainContext;
 			return { systemPrompt };
 		});
 	};

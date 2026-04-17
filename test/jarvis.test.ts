@@ -92,6 +92,8 @@ type TestOverlayViewState = {
 	mainStatus: string;
 	mainModelLabel: string;
 	mainFocusLabel: string;
+	mainDeltaLabel: string;
+	repoToolsDetailLabel: string;
 	modelLabel: string;
 	modelModeLabel: string;
 	displayEntries: ReturnType<JarvisOverlayView["getDisplayEntries"]>;
@@ -111,6 +113,8 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		mainStatus: "idle",
 		mainModelLabel: "openai/gpt-5.2",
 		mainFocusLabel: "waiting for user input",
+		mainDeltaLabel: "no significant change",
+		repoToolsDetailLabel: "repo tools off",
 		modelLabel: "faux/test-model",
 		modelModeLabel: "follow main",
 		displayEntries: [{ kind: "assistant", text: "hello from /jarvis" }],
@@ -129,6 +133,8 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 		getMainStatusLabel: () => state.mainStatus,
 		getMainModelLabel: () => state.mainModelLabel,
 		getMainFocusLabel: () => state.mainFocusLabel,
+		getMainDeltaLabel: () => state.mainDeltaLabel,
+		getRepoToolsDetailLabel: () => state.repoToolsDetailLabel,
 		isToolAccessEnabled: () => state.toolsEnabled,
 		isFollowUpToMainEnabled: () => state.followUpEnabled,
 		isSteerToMainEnabled: () => state.steerEnabled,
@@ -244,56 +250,63 @@ async function testOverlayForwardingToggleControls(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
 	const bridge = new JarvisOverlayBridge();
-	const { state, view } = createTestOverlayView({ mainStatus: "busy", mainFocusLabel: "editing side-session.ts" });
+	const { state, view } = createTestOverlayView({
+		mainStatus: "busy",
+		mainFocusLabel: "editing side-session.ts",
+		mainDeltaLabel: "focus → editing side-session.ts",
+		repoToolsDetailLabel: "local tools + MCP available",
+	});
 	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
 	overlay.focused = true;
 
 	let lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("Jarvis  Main busy")), "overlay header should show the Jarvis title and current main status");
-	assert.ok(lines.some((line) => line.includes("Models: openai/gpt-5.2")), "overlay header should show the current main model label");
+	assert.ok(lines.some((line) => line.includes("Jarvis · Main busy")), "overlay header should show the Jarvis title and current main status");
 	assert.ok(lines.some((line) => line.includes("Focus: editing side-session.ts")), "overlay header should show the current main-session focus");
-	assert.ok(lines.some((line) => line.includes("faux/test-model (follow main)")), "overlay header should show the active Jarvis model and mode");
-	assert.ok(lines.some((line) => line.includes("Tools: off")), "overlay header should show the Tools toggle state");
-	assert.ok(lines.some((line) => line.includes("Share: off")), "overlay header should show the Share toggle state");
-	assert.ok(lines.some((line) => line.includes("Steer: off")), "overlay header should show the Steer toggle state");
+	assert.ok(lines.some((line) => line.includes("Since last: focus → editing side-session.ts")), "overlay header should show the since-last delta");
+	assert.ok(lines.some((line) => line.includes("Access: local tools + MCP available")), "overlay header should show repo tool availability details");
+	assert.ok(lines.some((line) => line.includes("Models: main openai/gpt-5.2")), "overlay header should show the current main model label");
+	assert.ok(lines.some((line) => line.includes("jarvis faux/test-model (follow main)")), "overlay header should show the active Jarvis model and mode");
+	assert.ok(lines.some((line) => line.includes("Repo tools: off")), "overlay header should show the repo tools toggle state");
+	assert.ok(lines.some((line) => line.includes("Note main: off")), "overlay header should show the note-main toggle state");
+	assert.ok(lines.some((line) => line.includes("Redirect: off")), "overlay header should show the redirect toggle state");
 	assert.equal(cursorMarkerPresent(lines), true, "message input should be focused by default");
 
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
 	assert.equal(cursorMarkerPresent(lines), false, "tab should move focus from the message input to the first toggle");
-	assert.ok(lines.some((line) => line.includes("[Tools: off]")), "tab should focus the Tools toggle");
+	assert.ok(lines.some((line) => line.includes("[Repo tools: off]")), "tab should focus the repo tools toggle");
 
 	overlay.handleInput(" ");
-	assert.equal(state.toolsEnabled, true, "space should toggle the focused Tools control");
+	assert.equal(state.toolsEnabled, true, "space should toggle the focused repo tools control");
 	assert.deepEqual(state.sentMessages, [], "toggle controls should not send a chat message");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Tools: on]")), "overlay should render the updated Tools state");
+	assert.ok(lines.some((line) => line.includes("[Repo tools: on]")), "overlay should render the updated repo tools state");
 
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Share: off]")), "tab should move focus to the Share toggle");
+	assert.ok(lines.some((line) => line.includes("[Note main: off]")), "tab should move focus to the note-main toggle");
 
 	overlay.handleInput(" ");
-	assert.equal(state.followUpEnabled, true, "space should toggle the focused Share control");
+	assert.equal(state.followUpEnabled, true, "space should toggle the focused note-main control");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Share: on]")), "overlay should render the updated Share state");
+	assert.ok(lines.some((line) => line.includes("[Note main: on]")), "overlay should render the updated note-main state");
 
 	overlay.handleInput("\t");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Steer: off]")), "tab should move focus to the Steer toggle");
+	assert.ok(lines.some((line) => line.includes("[Redirect: off]")), "tab should move focus to the redirect toggle");
 
 	overlay.handleInput("\r");
-	assert.equal(state.steerEnabled, true, "enter should toggle the focused Steer control");
+	assert.equal(state.steerEnabled, true, "enter should toggle the focused redirect control");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Steer: on]")), "overlay should render the updated Steer state");
+	assert.ok(lines.some((line) => line.includes("[Redirect: on]")), "overlay should render the updated redirect state");
 
 	overlay.handleInput("\x1b[Z");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Share: on]")), "shift+tab should move focus backward");
+	assert.ok(lines.some((line) => line.includes("[Note main: on]")), "shift+tab should move focus backward");
 
 	overlay.handleInput("\x1b[Z");
 	lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Tools: on]")), "shift+tab should move focus back to the Tools toggle");
+	assert.ok(lines.some((line) => line.includes("[Repo tools: on]")), "shift+tab should move focus back to the repo tools toggle");
 
 	overlay.handleInput("\t");
 	overlay.handleInput("\t");
@@ -587,6 +600,8 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		assert.ok(firstSystemPrompt.includes(currentMainContext.workStateText), "/jarvis prompt should inject the current main-session work-state summary");
 		assert.ok(firstSystemPrompt.includes(currentMainContext.summaryText), "/jarvis prompt should inject the current main-session summary");
 		assert.ok(firstSystemPrompt.includes(currentMainContext.recentText), "/jarvis prompt should inject the current recent main-session window");
+		assert.ok(firstSystemPrompt.includes("Changes since the last /jarvis turn:"), "/jarvis prompt should include a delta heading");
+		assert.ok(firstSystemPrompt.includes("none yet in this side session"), "/jarvis prompt should describe the initial turn as having no prior delta");
 
 		currentMainContext = createMainContext("SECOND_MAIN_REQUEST", "second assistant status", "SECOND_RECENT_WINDOW");
 		communicationPermissions = {
@@ -598,6 +613,8 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		assert.ok(secondSystemPrompt.includes(currentMainContext.workStateText), "/jarvis prompt should refresh the injected work-state summary for each turn");
 		assert.ok(secondSystemPrompt.includes(currentMainContext.summaryText), "/jarvis prompt should refresh the injected main-session summary for each turn");
 		assert.ok(secondSystemPrompt.includes(currentMainContext.recentText), "/jarvis prompt should refresh the injected recent main-session window for each turn");
+		assert.ok(secondSystemPrompt.includes("Changes since the last /jarvis turn:"), "/jarvis prompt should continue including the delta heading on later turns");
+		assert.ok(secondSystemPrompt.includes("New main request: SECOND_MAIN_REQUEST"), "/jarvis prompt should describe a new main-session request since the prior turn");
 		assert.ok(!secondSystemPrompt.includes("FIRST_MAIN_REQUEST"), "/jarvis should not keep stale startup context in later turns");
 		assert.ok(secondSystemPrompt.includes("SECOND_MAIN_REQUEST"), "/jarvis should inject the latest main-session request");
 		assert.ok(secondSystemPrompt.includes("SECOND_RECENT_WINDOW"), "/jarvis should inject the latest recent main-session text");
@@ -871,6 +888,89 @@ async function testBuildMainSessionContext(): Promise<void> {
 	assert.ok(validationContext.summaryText.includes("Validation: npm test is running"));
 }
 
+async function testBuildMainSessionContextIdleStateClassification(): Promise<void> {
+	const blockedContext = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: "Fix the failing suite",
+		latestAssistantText: "Validation failed.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [
+			{
+				type: "message",
+				id: "blocked-bash",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: {
+					role: "bashExecution",
+					command: "npm test",
+					output: "1 failing test",
+					exitCode: 1,
+					cancelled: false,
+					truncated: false,
+					timestamp: 1,
+				},
+			} as any,
+		],
+	});
+	assert.equal(blockedContext.summary.workState.attentionMode, "blocked");
+	assert.equal(blockedContext.summary.workState.currentAction, "blocked on npm test");
+	assert.ok(blockedContext.summaryText.includes("Attention mode: blocked"));
+
+	const doneContext = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: "Wrap it up",
+		latestAssistantText: "Done.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [
+			{
+				type: "message",
+				id: "done-assistant",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Done." },
+						{ type: "toolCall", id: "call-done", name: "read", arguments: { path: "index.ts" } },
+					],
+					api: "test-api",
+					provider: "test-provider",
+					model: "test-model",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+					stopReason: "stop",
+					timestamp: 2,
+				},
+			} as any,
+		],
+	});
+	assert.equal(doneContext.summary.workState.attentionMode, "done");
+	assert.equal(doneContext.summary.workState.currentAction, "completed work around index.ts");
+	assert.ok(doneContext.summaryText.includes("Attention mode: done"));
+
+	const waitingContext = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: "What next?",
+		latestAssistantText: undefined,
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [],
+	});
+	assert.equal(waitingContext.summary.workState.attentionMode, "waiting-for-user");
+	assert.equal(waitingContext.summary.workState.currentAction, "waiting for user input");
+	assert.ok(waitingContext.summaryText.includes("Attention mode: waiting for user"));
+}
+
 async function testOverlayInputSwallowedOnToggleFocus(): Promise<void> {
 	const terminal = new FakeTerminal();
 	const tui = new TUI(terminal);
@@ -881,7 +981,7 @@ async function testOverlayInputSwallowedOnToggleFocus(): Promise<void> {
 
 	overlay.handleInput("\t");
 	let lines = overlay.render(80);
-	assert.ok(lines.some((line) => line.includes("[Tools: off]")), "tab should focus the Tools toggle");
+	assert.ok(lines.some((line) => line.includes("[Repo tools: off]")), "tab should focus the repo tools toggle");
 
 	overlay.handleInput("a");
 	overlay.handleInput("b");
@@ -1223,6 +1323,7 @@ class FakeExtensionAPI {
 class FakeJarvisRuntime {
 	syncModelCalls: Array<{ model: TestModel | undefined; thinkingLevel: string | undefined }> = [];
 	toolAccessCalls: boolean[] = [];
+	toolAccessEnabled = false;
 
 	constructor(
 		public currentModel: TestModel | undefined,
@@ -1241,12 +1342,17 @@ class FakeJarvisRuntime {
 		return this.currentModel ? `${this.currentModel.provider}/${this.currentModel.id}` : "model unavailable";
 	}
 
+	getRepoToolsDetailLabel(): string {
+		return this.toolAccessEnabled ? "local tools only" : "repo tools off";
+	}
+
 	getDisplayEntries(): ReturnType<JarvisOverlayView["getDisplayEntries"]> {
 		return [];
 	}
 
 	setToolAccessEnabled(enabled: boolean): void {
 		this.toolAccessCalls.push(enabled);
+		this.toolAccessEnabled = enabled;
 	}
 
 	async sendMessage(): Promise<void> {}
@@ -1560,9 +1666,15 @@ async function testJarvisOverlayToolToggleSyncsRuntime(): Promise<void> {
 
 		const runtime = await openJarvisRuntime(harness);
 		assert.ok(capturedComponent, "should capture overlay component");
+		let lines = capturedComponent.render(80) as string[];
+		assert.ok(lines.some((line) => line.includes("Since last: first /jarvis turn")), "overlay header should surface the since-last delta note");
+		assert.ok(lines.some((line) => line.includes("Access: repo tools off")), "overlay header should surface repo tool availability when tools are off");
+
 		capturedComponent.handleInput("\t");
 		capturedComponent.handleInput(" ");
 		assert.deepEqual(runtime.toolAccessCalls, [true], "toggling Tools in the overlay should update the live /jarvis runtime");
+		lines = capturedComponent.render(80) as string[];
+		assert.ok(lines.some((line) => line.includes("Access: local tools only")), "overlay header should surface repo tool availability when tools are enabled");
 	});
 }
 
@@ -2107,13 +2219,14 @@ async function main(): Promise<void> {
 	await testSideSessionFreshWelcomeMessage();
 	await testSideSessionKeepsPendingUserPromptAndShowsThinking();
 	await testSideSessionUsesMainSystemPrompt();
+	await testBuildMainSessionContext();
+	await testBuildMainSessionContextIdleStateClassification();
 	await testSideSessionToolWhitelist();
 	await testSideSessionLocalToolsActivateWhenPermitted();
 	await testSideSessionBridgeToolsActivateWhenPermitted();
 	await testFollowUpToolPermissionGating();
 	await testSteerToolPermissionAndConfirmGating();
 	await testSteerConfirmationRoutedThroughBridge();
-	await testBuildMainSessionContext();
 	await testPackageManifestDeclaresPiPeerDependencies();
 	console.log("jarvis tests passed");
 }

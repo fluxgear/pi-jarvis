@@ -36,7 +36,7 @@ const KNOWN_FILE_EXTENSIONS = new Set([
 	"lock",
 ]);
 
-export type MainAttentionMode = "planning" | "reading" | "editing" | "validating" | "searching" | "waiting";
+export type MainAttentionMode = "planning" | "reading" | "editing" | "validating" | "searching" | "waiting" | "waiting-for-user" | "blocked" | "done";
 
 export interface MainSessionWorkStatePayload {
 	attentionMode: MainAttentionMode;
@@ -152,7 +152,7 @@ export function formatMainSessionSummary(summary: MainSessionSummaryPayload): st
 		`- Model: ${summary.mainModelLabel}`,
 		`- Current tool activity: ${formatToolActivity(summary.currentToolActivity)}`,
 		`- Current focus: ${summary.workState.currentAction}`,
-		`- Attention mode: ${summary.workState.attentionMode}`,
+		`- Attention mode: ${formatAttentionMode(summary.workState.attentionMode)}`,
 		`- Active files: ${formatFileList(summary.workState.activeFiles)}`,
 		`- Recent files: ${formatFileList(summary.workState.recentFiles)}`,
 		`- Validation: ${summary.validation.summary}`,
@@ -256,7 +256,7 @@ function findLatestValidationEntry(branchEntries: MainSessionSnapshot["branchEnt
 function formatWorkStateSummary(workState: MainSessionWorkStatePayload): string {
 	return [
 		"Main work state:",
-		`- Attention mode: ${workState.attentionMode}`,
+		`- Attention mode: ${formatAttentionMode(workState.attentionMode)}`,
 		`- Current focus: ${workState.currentAction}`,
 		`- Active files: ${formatFileList(workState.activeFiles)}`,
 		`- Recent files: ${formatFileList(workState.recentFiles)}`,
@@ -268,6 +268,7 @@ function deriveMainSessionWorkState(snapshot: MainSessionSnapshot): MainSessionW
 	const recentFiles = extractRecentFiles(snapshot.branchEntries, activeFiles);
 	const primaryFile = activeFiles[0] ?? recentFiles[0];
 	const validationCommand = getActiveValidationCommand(snapshot.toolExecution.running);
+	const validation = deriveValidationState(snapshot);
 
 	if (validationCommand) {
 		return {
@@ -319,13 +320,58 @@ function deriveMainSessionWorkState(snapshot: MainSessionSnapshot): MainSessionW
 		};
 	}
 
+	if (validation.status === "failed") {
+		return {
+			attentionMode: "blocked",
+			currentAction: validation.command ? `blocked on ${validation.command}` : "blocked by the last validation failure",
+			primaryFile,
+			activeFiles,
+			recentFiles,
+		};
+	}
+
+	if (looksCompleted(snapshot.latestAssistantText, validation.status)) {
+		return {
+			attentionMode: "done",
+			currentAction: primaryFile ? `completed work around ${primaryFile}` : "completed the last task",
+			primaryFile,
+			activeFiles,
+			recentFiles,
+		};
+	}
+
+	if (snapshot.hasPendingMessages) {
+		return {
+			attentionMode: "waiting",
+			currentAction: "waiting on queued messages",
+			primaryFile,
+			activeFiles,
+			recentFiles,
+		};
+	}
+
 	return {
-		attentionMode: "waiting",
-		currentAction: snapshot.hasPendingMessages ? "waiting on queued messages" : "waiting for user input",
+		attentionMode: "waiting-for-user",
+		currentAction: "waiting for user input",
 		primaryFile,
 		activeFiles,
 		recentFiles,
 	};
+}
+
+function looksCompleted(latestAssistantText: string | undefined, validationStatus: MainValidationStatus): boolean {
+	const normalized = normalizeText(latestAssistantText).toLowerCase();
+	if (!normalized) {
+		return validationStatus === "passed";
+	}
+	if (validationStatus === "passed") {
+		return true;
+	}
+	return /^(done|completed|finished|wrapped up|all set|implemented|fixed|updated)\b/.test(normalized);
+}
+
+function formatAttentionMode(attentionMode: MainAttentionMode): string {
+	return attentionMode.replace(/-/g, " " );
 }
 
 function extractActiveFiles(runningToolCalls: readonly MainSessionSnapshot["toolExecution"]["running"][number][]): string[] {

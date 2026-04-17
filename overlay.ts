@@ -14,6 +14,8 @@ export interface JarvisOverlayView {
 	getMainStatusLabel(): string;
 	getMainModelLabel(): string;
 	getMainFocusLabel(): string;
+	getMainDeltaLabel(): string;
+	getRepoToolsDetailLabel(): string;
 	isToolAccessEnabled(): boolean;
 	isFollowUpToMainEnabled(): boolean;
 	isSteerToMainEnabled(): boolean;
@@ -322,25 +324,29 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	private renderHeader(innerWidth: number): string[] {
 		const mainStatus = this.view.getMainStatusLabel();
 		const mainStatusColor = mainStatus === "busy" ? "warning" : "success";
-		const toolsToggle = this.renderToggle("Tools", this.view.isToolAccessEnabled(), this.focused && this.focusTarget === "tools");
-		const followUpToggle = this.renderToggle("Share", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
-		const steerToggle = this.renderToggle("Steer", this.view.isSteerToMainEnabled(), this.focused && this.focusTarget === "steer");
+		const toolsToggle = this.renderToggle("Repo tools", this.view.isToolAccessEnabled(), this.focused && this.focusTarget === "tools");
+		const followUpToggle = this.renderToggle("Note main", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
+		const steerToggle = this.renderToggle("Redirect", this.view.isSteerToMainEnabled(), this.focused && this.focusTarget === "steer");
 		const mainModel = this.view.getMainModelLabel();
 		const sideModel = this.view.getModelLabel();
 		const modelMode = this.view.getModelModeLabel();
 		const focus = this.view.getMainFocusLabel();
+		const delta = this.view.getMainDeltaLabel();
+		const repoToolsDetail = this.view.getRepoToolsDetailLabel();
 		return [
 			truncateToWidth(
-				`${this.theme.bold(this.theme.fg("accent", "Jarvis"))}  ${this.theme.fg("accent", "Main")} ${this.theme.fg(mainStatusColor, mainStatus)}`,
+				`${this.theme.bold(this.theme.fg("accent", "Jarvis"))} ${this.theme.fg("muted", "·")} ${this.theme.fg("accent", "Main")} ${this.theme.fg(mainStatusColor, mainStatus)}`,
 				innerWidth,
 			),
+			truncateToWidth(this.theme.fg("muted", `Focus: ${focus}`), innerWidth, "", true),
+			truncateToWidth(this.theme.fg("muted", `Since last: ${delta}`), innerWidth, "", true),
+			truncateToWidth(this.theme.fg("muted", `Access: ${repoToolsDetail}`), innerWidth, "", true),
 			truncateToWidth(
-				`${this.theme.fg("muted", "Models:")} ${this.theme.fg("muted", `${mainModel}  /  ${sideModel} (${modelMode})`)}`,
+				`${this.theme.fg("muted", "Models:")} ${this.theme.fg("muted", `main ${mainModel}  ·  jarvis ${sideModel} (${modelMode})`)}` ,
 				innerWidth,
 				"",
 				true,
 			),
-			truncateToWidth(this.theme.fg("muted", `Focus: ${focus}`), innerWidth, "", true),
 			truncateToWidth(`${toolsToggle}  ${followUpToggle}  ${steerToggle}`, innerWidth, "", true),
 		];
 	}

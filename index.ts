@@ -21,6 +21,7 @@ type MainState = {
 	bridge: JarvisOverlayBridge;
 	mainSession: MainSessionTracker;
 	mainContext: MainSessionContextPayload;
+	lastJarvisSeenMainContext?: MainSessionContextPayload;
 	sessionRef?: JarvisSessionRef;
 	runtime?: JarvisSideSessionRuntime;
 	bootPromise?: Promise<JarvisSideSessionRuntime>;
@@ -42,6 +43,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		bridge: new JarvisOverlayBridge(),
 		mainSession,
 		mainContext: buildMainSessionContext(mainSession.snapshot()),
+		lastJarvisSeenMainContext: undefined,
 		queuedMessages: [],
 		jarvisModelSelection: { mode: "follow-main" },
 		systemPrompt: "",
@@ -192,6 +194,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		state.bootPromise = undefined;
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
+		state.lastJarvisSeenMainContext = undefined;
 		state.jarvisModelSelection = { mode: "follow-main" };
 		state.allowSideTools = false;
 		state.allowFollowUpToMain = false;
@@ -267,6 +270,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		state.bootPromise = undefined;
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
+		state.lastJarvisSeenMainContext = undefined;
 		state.jarvisModelSelection = { mode: "follow-main" };
 		state.allowSideTools = false;
 		state.allowFollowUpToMain = false;
@@ -429,6 +433,8 @@ function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCom
 		getMainStatusLabel: () => state.mainContext.summary.mainStatus,
 		getMainModelLabel: () => state.mainContext.summary.mainModelLabel,
 		getMainFocusLabel: () => state.mainContext.summary.workState.currentAction,
+		getMainDeltaLabel: () => formatMainContextDeltaLabel(state.lastJarvisSeenMainContext, state.mainContext),
+		getRepoToolsDetailLabel: () => state.runtime?.getRepoToolsDetailLabel() ?? (state.allowSideTools ? "local tools only" : "repo tools off"),
 		isToolAccessEnabled: () => state.allowSideTools,
 		isFollowUpToMainEnabled: () => state.allowFollowUpToMain,
 		isSteerToMainEnabled: () => state.allowSteerToMain,
@@ -479,11 +485,44 @@ function getOverlayEntries(state: MainState): JarvisDisplayEntry[] {
 		}
 	}
 
+	entries.push({ kind: "status", text: `Since last /jarvis turn: ${formatMainContextDeltaLabel(state.lastJarvisSeenMainContext, state.mainContext)}` });
+	entries.push({ kind: "status", text: `Repo tools: ${state.runtime?.getRepoToolsDetailLabel() ?? (state.allowSideTools ? "local tools only" : "repo tools off")}` });
+
 	if (!isModelBridgeCompatible(getDesiredJarvisModel(state))) {
 		entries.push({ kind: "status", text: "Relay disabled: current /jarvis model is incompatible with bridge tools" });
 	}
 
 	return entries;
+}
+
+function formatMainContextDeltaLabel(
+	previousContext: MainSessionContextPayload | undefined,
+	currentContext: MainSessionContextPayload,
+): string {
+	if (!previousContext) {
+		return "first /jarvis turn";
+	}
+	if (currentContext.summary.workState.currentAction !== previousContext.summary.workState.currentAction) {
+		return `focus → ${currentContext.summary.workState.currentAction}`;
+	}
+	if (currentContext.summary.validation.summary !== previousContext.summary.validation.summary) {
+		return `validation → ${currentContext.summary.validation.summary}`;
+	}
+	if (currentContext.summary.mainStatus !== previousContext.summary.mainStatus) {
+		return `main status → ${currentContext.summary.mainStatus}`;
+	}
+	if (currentContext.summary.mainModelLabel !== previousContext.summary.mainModelLabel) {
+		return `model → ${currentContext.summary.mainModelLabel}`;
+	}
+	const previousFiles = new Set(previousContext.summary.workState.recentFiles);
+	const newFiles = currentContext.summary.workState.recentFiles.filter((file) => !previousFiles.has(file));
+	if (newFiles.length > 0) {
+		return `new files → ${newFiles.join(", ")}`;
+	}
+	if (currentContext.summary.latestUserRequest && currentContext.summary.latestUserRequest !== previousContext.summary.latestUserRequest) {
+		return `request → ${currentContext.summary.latestUserRequest}`;
+	}
+	return "no significant change";
 }
 
 async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: ExtensionCommandContext): Promise<void> {
@@ -507,6 +546,7 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 				const message = state.queuedMessages.shift()!;
 				try {
 					await runtime.sendMessage(message);
+					state.lastJarvisSeenMainContext = state.mainContext;
 				} catch (error) {
 					state.bridge.notify(`Failed to send /jarvis message: ${error instanceof Error ? error.message : String(error)}`, "error");
 					break;
