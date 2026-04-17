@@ -255,6 +255,8 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		const snapshot = this.bridge.snapshot();
 		const notificationLines = this.notificationLines(snapshot.notifications, innerWidth);
 		const headerLines = this.renderHeader(innerWidth);
+		const transcriptDivider = this.sectionDivider("Conversation", innerWidth);
+		const promptDivider = this.sectionDivider(hasConfirmation ? "Confirm" : "Prompt", innerWidth);
 		const confirmationLines = snapshot.pendingConfirmation
 			? this.renderConfirmation(snapshot.pendingConfirmation, innerWidth)
 			: undefined;
@@ -267,11 +269,12 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		// Pre-compute every fixed section first so the transcript budget reflects
 		// the true remaining space. Under-reserving here would push the footer
 		// (or the confirmation banner) off the bottom of the overlay.
-		const promptSectionLines = confirmationLines ? confirmationLines.length : 2;
+		const promptSectionLines = confirmationLines ? confirmationLines.length + 1 : 2;
 		const footerSectionLines = 1;
 		const borderLines = 2;
+		const transcriptSectionLines = 1;
 		const reservedLines =
-			headerLines.length + notificationLines.length + promptSectionLines + footerSectionLines + borderLines;
+			headerLines.length + notificationLines.length + transcriptSectionLines + promptSectionLines + footerSectionLines + borderLines;
 		const transcriptBudget = Math.max(4, maxHeight - reservedLines);
 		const transcriptLines = this.renderTranscript(innerWidth, transcriptBudget, snapshot);
 
@@ -280,14 +283,13 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		if (notificationLines.length > 0) {
 			body.push(...notificationLines);
 		}
+		body.push(transcriptDivider);
 		body.push(...transcriptLines);
+		body.push(promptDivider);
 		if (confirmationLines) {
 			body.push(...confirmationLines);
-		} else {
-			body.push(this.theme.fg(this.focused && this.focusTarget === "input" ? "accent" : "muted", "Message"));
-			if (inputLine) {
-				body.push(inputLine);
-			}
+		} else if (inputLine) {
+			body.push(inputLine);
 		}
 		body.push(footer);
 
@@ -407,9 +409,18 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		const lines: string[] = [];
 		for (const item of recent) {
 			const color = item.type === "error" ? "error" : item.type === "warning" ? "warning" : "muted";
+			lines.push(this.sectionDivider("Notice", innerWidth));
 			lines.push(...this.wrapBlock(this.theme.fg(color, item.message), innerWidth));
 		}
 		return lines;
+	}
+
+	private sectionDivider(label: string, innerWidth: number): string {
+		const plain = ` ${label} `;
+		const fillWidth = Math.max(0, innerWidth - plain.length);
+		const left = Math.floor(fillWidth / 2);
+		const right = fillWidth - left;
+		return truncateToWidth(this.theme.fg("borderMuted", `${"─".repeat(left)}${plain}${"─".repeat(right)}`), innerWidth, "", true);
 	}
 
 	private renderToggle(label: string, enabled: boolean, focused: boolean): string {

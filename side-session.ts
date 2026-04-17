@@ -678,21 +678,61 @@ function extractTextContent(content: unknown): string {
 }
 
 function extractAssistantText(message: AssistantMessage): string {
-	return message.content
-		.map((part) => {
-			if (part.type === "text") {
-				return part.text;
-			}
-			if (part.type === "toolCall") {
+	return sanitizeAssistantOverlayText(
+		message.content
+			.map((part) => {
+				if (part.type === "text") {
+					return part.text;
+				}
+				if (part.type === "toolCall") {
+					return "";
+				}
+				if (part.type === "thinking") {
+					return "";
+				}
 				return "";
-			}
-			if (part.type === "thinking") {
-				return "";
-			}
-			return "";
-		})
+			})
+			.filter(Boolean)
+			.join("\n\n"),
+	);
+}
+
+function sanitizeAssistantOverlayText(text: string): string {
+	const normalized = text.replace(/\r/g, "");
+	const paragraphs = normalized
+		.split(/\n\s*\n/)
+		.map((paragraph) => paragraph.trim())
 		.filter(Boolean)
-		.join("\n\n");
+		.map((paragraph) =>
+			paragraph
+				.split("\n")
+				.map((line) => line.trimEnd())
+				.filter((line) => !isLeakedAssistantToolLine(line))
+				.join("\n")
+				.trim(),
+		)
+		.filter((paragraph) => paragraph.length > 0)
+		.filter((paragraph) => !isLeakedAssistantToolParagraph(paragraph));
+	return paragraphs.join("\n\n");
+}
+
+function isLeakedAssistantToolLine(line: string): boolean {
+	const trimmed = line.trim();
+	if (!trimmed) {
+		return false;
+	}
+	return (
+		/^to=\w+/i.test(trimmed) ||
+		/^```/.test(trimmed) ||
+		(/^\{.*\}$/.test(trimmed) && /"(?:filePath|path|command|content|output)"/.test(trimmed))
+	);
+}
+
+function isLeakedAssistantToolParagraph(paragraph: string): boolean {
+	return (
+		/\bto=(?:read|write|edit|bash|mcp|grep|find|ls)\b/i.test(paragraph) ||
+		/\{\s*"(?:filePath|path|command|content|output)"/i.test(paragraph)
+	);
 }
 
 function formatToolCall(toolName: string, args: Record<string, unknown> | undefined): string {

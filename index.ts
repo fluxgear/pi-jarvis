@@ -74,8 +74,12 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 			await ctx.ui.custom<void>(
 				(tui, theme, _keybindings, done) => {
 					state.themeProvider = () => theme;
+					const closeOverlay = () => {
+						done(undefined);
+						queueMicrotask(() => tui.requestRender());
+					};
 					return attachOverlayBridge(
-						new JarvisOverlayComponent(tui, theme, state.bridge, overlayView, () => done(undefined)),
+						new JarvisOverlayComponent(tui, theme, state.bridge, overlayView, closeOverlay),
 						state.bridge,
 						tui,
 					);

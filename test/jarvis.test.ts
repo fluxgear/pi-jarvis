@@ -463,6 +463,42 @@ async function testSideSessionKeepsPendingUserPromptAndShowsThinking(): Promise<
 	});
 }
 
+async function testSideSessionSanitizesLeakedToolScaffolding(): Promise<void> {
+	await withSideSessionRuntime({}, async (runtime) => {
+		const internal = runtime as unknown as {
+			streamingAssistant?: {
+				role: "assistant";
+				content: Array<{ type: string; text?: string }>;
+			};
+			getDisplayEntries(): ReturnType<JarvisSideSessionRuntime["getDisplayEntries"]>;
+		};
+
+		internal.streamingAssistant = {
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: [
+						"I'll check `README.md` first.",
+						"",
+						"to=read",
+						'{"filePath":"/home/fluxgear/git/pi-jarvis/README.md"}',
+						"",
+						"Hello. I've read `README.md`.",
+						"What would you like changed in `pi-jarvis`?",
+					].join("\n"),
+				},
+			],
+		};
+
+		const assistantEntry = internal.getDisplayEntries().find((entry) => entry.kind === "assistant");
+		assert.ok(assistantEntry, "assistant output should still render after sanitization");
+		assert.ok(!assistantEntry!.text.includes("to=read"), "overlay should not render leaked tool routing text inside assistant output");
+		assert.ok(!assistantEntry!.text.includes('"filePath"'), "overlay should not render leaked tool JSON arguments inside assistant output");
+		assert.ok(assistantEntry!.text.includes("Hello. I've read `README.md`."), "overlay should preserve the final assistant reply after sanitization");
+	});
+}
+
 async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
@@ -2218,6 +2254,7 @@ async function main(): Promise<void> {
 	await testSideSessionPersistence();
 	await testSideSessionFreshWelcomeMessage();
 	await testSideSessionKeepsPendingUserPromptAndShowsThinking();
+	await testSideSessionSanitizesLeakedToolScaffolding();
 	await testSideSessionUsesMainSystemPrompt();
 	await testBuildMainSessionContext();
 	await testBuildMainSessionContextIdleStateClassification();
