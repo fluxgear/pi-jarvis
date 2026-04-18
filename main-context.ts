@@ -330,20 +330,20 @@ function deriveMainSessionWorkState(snapshot: MainSessionSnapshot): MainSessionW
 		};
 	}
 
-	if (looksCompleted(snapshot.latestAssistantText, validation.status)) {
+	if (snapshot.hasPendingMessages) {
 		return {
-			attentionMode: "done",
-			currentAction: primaryFile ? `completed work around ${primaryFile}` : "completed the last task",
+			attentionMode: "waiting",
+			currentAction: "waiting on queued messages",
 			primaryFile,
 			activeFiles,
 			recentFiles,
 		};
 	}
 
-	if (snapshot.hasPendingMessages) {
+	if (looksCompleted(snapshot.latestAssistantText, validation.status)) {
 		return {
-			attentionMode: "waiting",
-			currentAction: "waiting on queued messages",
+			attentionMode: "done",
+			currentAction: primaryFile ? `completed work around ${primaryFile}` : "completed the last task",
 			primaryFile,
 			activeFiles,
 			recentFiles,

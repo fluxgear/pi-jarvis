@@ -475,11 +475,11 @@ function getOverlayEntries(state: MainState): JarvisDisplayEntry[] {
 	if (state.runtime) {
 		entries = state.runtime.getDisplayEntries();
 	} else {
-		const hadSessionRef = Boolean(state.sessionRef?.file);
+		const hasRestorableSessionRef = Boolean(state.sessionRef?.file && existsSync(state.sessionRef.file));
 		entries = [
 			{
 				kind: "system",
-				text: hadSessionRef
+				text: hasRestorableSessionRef
 					? "Connecting to your prior /jarvis conversation…"
 					: "Starting /jarvis side conversation…",
 			},
@@ -544,7 +544,7 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 	state.flushPromise = (async () => {
 		try {
 			const runtime = await ensureRuntime(pi, state, ctx);
-			await runtime.syncModel(getDesiredJarvisModel(state), state.thinkingLevel);
+			await runtime.syncModel(getDesiredJarvisModel(state), getDesiredJarvisThinkingLevel(state));
 
 			while (state.queuedMessages.length > 0) {
 				const message = state.queuedMessages.shift()!;
