@@ -1,53 +1,109 @@
 # pi-jarvis
 
-`pi-jarvis` is a Pi extension that opens a `/jarvis` side-conversation overlay inside the Pi coding agent.
+`pi-jarvis` adds a polished `/jarvis` side-conversation overlay to Pi so you can ask for help without derailing the main session.
 
-## Features
+## Why use it
 
-- Opens a floating `/jarvis` overlay from within the current Pi session
-- Keeps a separate `/jarvis` side-session history
-- Restores prior `/jarvis` conversation state from a session file under `jarvis-sessions/`
-- Follows the main Pi model by default, with `/jarvis-model` available to pin a different model or return to follow-main
-- Supports permission-gated local repo/system tools plus optional forwarding of a concise note or redirected instruction into the main session
-- Includes a focused automated regression suite
+`/jarvis` gives you a second lane for quick questions, triage, and local investigation while the main session keeps moving. Instead of interrupting the primary flow, it opens a separate persistent side thread with explicit controls for tool access and main-session handoff.
 
-## How to use
+## What you get
 
-Start the side session from any point in Pi:
+- A floating `/jarvis` overlay inside the current Pi session
+- A separate side-session history that survives reopening the overlay
+- Automatic follow-main model behavior, with optional `/jarvis-model` pinning
+- Permission-gated local `read`, `bash`, `edit`, and `write` access, plus `mcp` when available
+- Optional non-interrupting notes or confirmed redirects back to the main session
+- A focused regression suite covering the risky runtime and overlay paths
 
-```bash
-/jarvis
-```
+## Quick start
 
-`/jarvis` opens an overlay where you can ask for quick help without interrupting your primary workflow.
-
-You can start with a direct question:
-
-```bash
-/jarvis check this file for obvious regressions
-```
-
-Or run in the background while you continue with normal interaction:
-
-```bash
-/jarvis summarize last 20 lines of build output and suggest next action
-```
-
-Behavior notes:
-
-- `/jarvis` has its own isolated conversation state, separate from the main session.
-- `/jarvis` follows the main model by default. Use `/jarvis-model <provider/model>` to pin a side-session model, or `/jarvis-model follow-main` to restore follow-main mode.
-- The overlay controls `Repo tools`, `Note main`, and `Redirect` are all off by default.
-- When `Repo tools` is enabled, `/jarvis` may use local `read`, `bash`, `edit`, and `write`, plus `mcp` when it is available in the current Pi environment.
-- Thinking-step streaming is intentionally collapsed to a polished animated fallback for `/jarvis` readability.
-
-## Installation
+### 1. Install the package
 
 ```bash
 npm install pi-jarvis
 ```
 
-Then register the extension in Pi with the published entrypoint `./dist/index.js`.
+### 2. Register the extension entrypoint in Pi
+
+Use the published entrypoint:
+
+```text
+./dist/index.js
+```
+
+This package is intended to run inside a Pi installation that provides the required peer dependencies.
+
+### 3. Open `/jarvis`
+
+```bash
+/jarvis
+```
+
+You can also send the first message immediately:
+
+```bash
+/jarvis check this file for obvious regressions
+```
+
+Or use it as a background helper while continuing the main flow:
+
+```bash
+/jarvis summarize last 20 lines of build output and suggest next action
+```
+
+## Commands
+
+### `/jarvis`
+Opens the side overlay. If you pass text after the command, that text becomes the first side-session prompt.
+
+### `/jarvis-model <provider/model>`
+Pins `/jarvis` to a specific model without changing the main session model.
+
+### `/jarvis-model follow-main`
+Returns `/jarvis` to the default mode where it follows the current main model.
+
+## Overlay behavior
+
+The overlay is designed to stay explicit about what `/jarvis` can do right now. It surfaces:
+
+- the current main-session state
+- the active `/jarvis` model and mode
+- what changed since the last `/jarvis` turn
+- whether local tools are off, enabled, or enabled without MCP
+
+The main header controls are:
+
+- `Repo tools`
+- `Note main`
+- `Redirect`
+
+All three are off by default.
+
+## Permission model
+
+### Repo tools
+When enabled, `/jarvis` may use local:
+
+- `read`
+- `bash`
+- `edit`
+- `write`
+- `mcp` when the MCP adapter is available in the current Pi environment
+
+When disabled, `/jarvis` works from injected session context and the bridge controls only.
+
+### Note main
+Allows `/jarvis` to send a concise, non-interrupting note back to the main session.
+
+### Redirect
+Allows `/jarvis` to send a redirecting instruction to the main session, but every actual redirect still requires explicit confirmation.
+
+## Session model
+
+- `/jarvis` keeps its own isolated conversation state
+- prior side-session history is restored from a session file under `jarvis-sessions/`
+- `/jarvis` follows the main model by default
+- thinking-step streaming is collapsed to a cleaner animated fallback for readability
 
 ## Development
 
@@ -75,9 +131,9 @@ Build the published package contents:
 npm run build
 ```
 
-## Package contents
+## Published package contents
 
-The published npm package includes the compiled extension plus the public docs and metadata used by Pi and npm:
+The npm package publishes:
 
 - `dist/`
 - `README.md`
