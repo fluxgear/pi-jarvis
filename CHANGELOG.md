@@ -4,6 +4,11 @@ This changelog tracks the tagged release history of this project. Earlier entrie
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.5] - 2026-04-19
+
+### Changed
+- Added the `pi-package` and `extension` keywords so `pi-jarvis` is discoverable by the `pi.dev` package index.
+
 ## [1.1.1] - 2026-04-17
 
 ### Fixed
