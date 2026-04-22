@@ -4,6 +4,15 @@ This changelog tracks the tagged release history of this project. Earlier entrie
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-04-22
+
+### Added
+- Added layered `/jarvis` model settings with project overrides in `.pi/jarvis.json`, global defaults in `~/.pi/agent/extensions/pi-jarvis.json`, and fallback to built-in `follow-main`.
+
+### Changed
+- Updated `/jarvis-model` to support scoped `--project` and `--global` writes plus `clear` semantics for falling back through the config layers.
+- Replaced the prior branch-scoped `/jarvis` model persistence with explicit config-backed precedence and refreshed the regression coverage and README.
+
 ## [1.1.5] - 2026-04-19
 
 ### Changed

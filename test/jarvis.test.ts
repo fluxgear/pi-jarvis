@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AuthStorage, ModelRegistry, SessionManager, type SessionEntry } from "@mariozechner/pi-coding-agent";
@@ -25,6 +25,7 @@ import { JarvisOverlayBridge, JarvisOverlayComponent, attachOverlayBridge, curso
 import { buildMainSessionContext, DEFAULT_MAIN_SESSION_RECENT_LIMIT } from "../main-context.js";
 import { MainSessionTracker } from "../main-session-state.js";
 import { createJarvisSessionRef, readJarvisSessionRef, JARVIS_SESSION_REF_CUSTOM_TYPE } from "../session-ref.js";
+import { clearJarvisModelSelectionSetting, getJarvisConfigPath, loadJarvisModelSelectionSetting, saveJarvisModelSelectionSetting } from "../jarvis-config.js";
 import { JarvisSideSessionRuntime, createSideSessionFile } from "../side-session.js";
 import jarvisExtension from "../index.js";
 
@@ -182,6 +183,39 @@ async function testSessionRef(): Promise<void> {
 	]);
 	assert.deepEqual(loaded, ref);
 	assert.equal(readJarvisSessionRef([]), undefined);
+}
+
+async function testJarvisModelConfigRoundTrip(): Promise<void> {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-config-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		saveJarvisModelSelectionSetting(cwd, "global", { mode: "pinned", provider: "test-provider", modelId: "side-beta" });
+		assert.deepEqual(loadJarvisModelSelectionSetting(cwd, "global"), { mode: "pinned", provider: "test-provider", modelId: "side-beta" });
+
+		saveJarvisModelSelectionSetting(cwd, "project", { mode: "follow-main" });
+		assert.deepEqual(loadJarvisModelSelectionSetting(cwd, "project"), { mode: "follow-main" });
+
+		clearJarvisModelSelectionSetting(cwd, "project");
+		assert.equal(loadJarvisModelSelectionSetting(cwd, "project"), undefined);
+		assert.equal(existsSync(getJarvisConfigPath(cwd, "project")), false);
+
+		clearJarvisModelSelectionSetting(cwd, "global");
+		assert.equal(loadJarvisModelSelectionSetting(cwd, "global"), undefined);
+		assert.equal(existsSync(getJarvisConfigPath(cwd, "global")), false);
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
 }
 
 async function testOverlayFocusAndEscRouting(): Promise<void> {
@@ -1412,7 +1446,12 @@ type TestExtensionCommandContext = {
 class FakeExtensionAPI {
 	private readonly commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> | void }>();
 	private readonly listeners = new Map<string, Array<(event: unknown, ctx: unknown) => Promise<void> | void>>();
+	private branchEntries?: SessionEntry[];
 	thinkingLevel: string | undefined = "high";
+
+	attachBranch(entries: SessionEntry[]): void {
+		this.branchEntries = entries;
+	}
 
 	registerCommand(name: string, definition: { handler: (args: string, ctx: unknown) => Promise<void> | void }): void {
 		this.commands.set(name, definition);
@@ -1424,7 +1463,9 @@ class FakeExtensionAPI {
 		this.listeners.set(eventName, handlers);
 	}
 
-	appendEntry(): void {}
+	appendEntry(customType: string, data: unknown): void {
+		this.branchEntries?.push({ type: "custom", customType, data } as SessionEntry);
+	}
 
 	sendUserMessage(): void {}
 
@@ -1626,6 +1667,7 @@ async function withJarvisExtensionHarness(run: (harness: JarvisExtensionHarness)
 
 	const api = new FakeExtensionAPI();
 	const ctx = createTestExtensionCommandContext(cwd, modelRegistry, mainModel);
+	api.attachBranch(ctx.branchEntries);
 	let runtime: FakeJarvisRuntime | undefined;
 
 	const originalCreate = JarvisSideSessionRuntime.create;
@@ -1928,6 +1970,121 @@ async function testJarvisModelReturnToFollowMainBehavior(): Promise<void> {
 			runtime.syncModelCalls.map((call) => call.model?.id),
 			[harness.nextMainModel.id, harness.mainModel.id],
 			"only the explicit follow-main reset and later main model_select should sync the runtime after pinning",
+		);
+	});
+}
+
+async function testJarvisModelDefaultScopeWritesProjectConfig(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		await harness.api.runCommand("jarvis-model", "side-beta", harness.ctx);
+		assert.deepEqual(
+			loadJarvisModelSelectionSetting(harness.ctx.cwd, "project"),
+			{ mode: "pinned", provider: harness.pinnedModel.provider, modelId: harness.pinnedModel.id },
+			"plain /jarvis-model should persist to the project config by default",
+		);
+		assert.equal(loadJarvisModelSelectionSetting(harness.ctx.cwd, "global"), undefined);
+
+		harness.ctx.model = harness.nextMainModel;
+		await harness.api.emit("session_start", {}, harness.ctx);
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.pinnedModel.id,
+			"the project-scoped /jarvis model should be restored after a new session starts",
+		);
+	});
+}
+
+async function testJarvisGlobalSettingAppliesWithoutProjectOverride(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "global", {
+			mode: "pinned",
+			provider: harness.pinnedModel.provider,
+			modelId: harness.pinnedModel.id,
+		});
+
+		harness.ctx.model = harness.nextMainModel;
+		await harness.api.emit("session_start", {}, harness.ctx);
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.pinnedModel.id,
+			"the global /jarvis model should apply when the project has no override",
+		);
+	});
+}
+
+async function testJarvisProjectSettingOverridesGlobalSetting(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "global", {
+			mode: "pinned",
+			provider: harness.pinnedModel.provider,
+			modelId: harness.pinnedModel.id,
+		});
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "project", {
+			mode: "pinned",
+			provider: harness.nextMainModel.provider,
+			modelId: harness.nextMainModel.id,
+		});
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.nextMainModel.id,
+			"the project /jarvis setting should override the global setting",
+		);
+	});
+}
+
+async function testJarvisClearProjectSettingFallsBackToGlobal(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "global", {
+			mode: "pinned",
+			provider: harness.pinnedModel.provider,
+			modelId: harness.pinnedModel.id,
+		});
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "project", {
+			mode: "pinned",
+			provider: harness.nextMainModel.provider,
+			modelId: harness.nextMainModel.id,
+		});
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.currentModel?.id, harness.nextMainModel.id);
+
+		await harness.api.runCommand("jarvis-model", "clear --project", harness.ctx);
+		assert.equal(loadJarvisModelSelectionSetting(harness.ctx.cwd, "project"), undefined);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.pinnedModel.id,
+			"clearing the project /jarvis setting should fall back to the global setting",
+		);
+	});
+}
+
+async function testJarvisClearGlobalSettingFallsBackToDefault(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "global", {
+			mode: "pinned",
+			provider: harness.pinnedModel.provider,
+			modelId: harness.pinnedModel.id,
+		});
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.currentModel?.id, harness.pinnedModel.id);
+
+		await harness.api.runCommand("jarvis-model", "clear --global", harness.ctx);
+		assert.equal(loadJarvisModelSelectionSetting(harness.ctx.cwd, "global"), undefined);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.mainModel.id,
+			"clearing the global /jarvis setting without a project override should fall back to follow-main",
 		);
 	});
 }
@@ -2395,6 +2552,7 @@ async function testMainSessionTrackerToolExecutionKeying(): Promise<void> {
 
 async function main(): Promise<void> {
 	await testSessionRef();
+	await testJarvisModelConfigRoundTrip();
 	await testOverlayFocusAndEscRouting();
 	await testOverlayRenderDistinctness();
 	await testOverlayAnimatedThinkingFallback();
@@ -2417,6 +2575,11 @@ async function main(): Promise<void> {
 	await testJarvisOverlaySkipsReconnectTextForMissingSessionRef();
 	await testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning();
 	await testJarvisModelReturnToFollowMainBehavior();
+	await testJarvisModelDefaultScopeWritesProjectConfig();
+	await testJarvisGlobalSettingAppliesWithoutProjectOverride();
+	await testJarvisProjectSettingOverridesGlobalSetting();
+	await testJarvisClearProjectSettingFallsBackToGlobal();
+	await testJarvisClearGlobalSettingFallsBackToDefault();
 	await testSideSessionPersistence();
 	await testSideSessionFreshWelcomeMessage();
 	await testSideSessionKeepsPendingUserPromptAndShowsThinking();

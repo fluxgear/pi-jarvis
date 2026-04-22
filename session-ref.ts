@@ -25,12 +25,14 @@ export function readJarvisSessionRef(entries: readonly BranchEntryLike[]): Jarvi
 	return undefined;
 }
 
+
 export function createJarvisSessionRef(file: string): JarvisSessionRef {
 	return {
 		version: 1,
 		file,
 	};
 }
+
 
 function parseJarvisSessionRef(data: unknown): JarvisSessionRef | undefined {
 	if (!data || typeof data !== "object") {

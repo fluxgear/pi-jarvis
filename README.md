@@ -56,23 +56,22 @@ Or use it as a background helper while continuing the main flow:
 ### `/jarvis`
 Opens the side overlay. If you pass text after the command, that text becomes the first side-session prompt.
 
-### `/jarvis-model <provider/model>`
-Pins `/jarvis` to a specific model without changing the main session model.
+### `/jarvis-model [--project|--global] <provider/model>`
+Pins `/jarvis` to a specific model without changing the main session model. Plain `/jarvis-model <provider/model>` writes a project-local override in `.pi/jarvis.json`.
 
-### `/jarvis-model follow-main`
-Returns `/jarvis` to the default mode where it follows the current main model.
+### `/jarvis-model [--project|--global] follow-main`
+Sets the selected scope back to follow-main. A project follow-main override still wins over a global pinned setting.
+
+### `/jarvis-model [--project|--global] clear`
+Removes the selected scope's override so `/jarvis` falls back to the remaining config layer or the built-in default.
 
 ## Overlay behavior
-
-The overlay is designed to stay explicit about what `/jarvis` can do right now. It surfaces:
-
 - the current main-session state
 - the active `/jarvis` model and mode
 - what changed since the last `/jarvis` turn
 - whether local tools are off, enabled, or enabled without MCP
 
 The main header controls are:
-
 - `Repo tools`
 - `Note main`
 - `Redirect`
@@ -99,16 +98,15 @@ Allows `/jarvis` to send a concise, non-interrupting note back to the main sessi
 Allows `/jarvis` to send a redirecting instruction to the main session, but every actual redirect still requires explicit confirmation.
 
 ## Session model
-
 - `/jarvis` keeps its own isolated conversation state
 - prior side-session history is restored from a session file under `jarvis-sessions/`
-- `/jarvis` follows the main model by default
+- `/jarvis` resolves its model from project config (`.pi/jarvis.json`), then global config (`~/.pi/agent/extensions/pi-jarvis.json`), then the built-in `follow-main` default
+- plain `/jarvis-model <provider/model>` writes the project override; use `--global` to change the global default
 - thinking-step streaming is collapsed to a cleaner animated fallback for readability
 
 ## Development
 
 Install dependencies:
-
 ```bash
 npm install
 ```

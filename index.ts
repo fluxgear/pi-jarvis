@@ -11,11 +11,29 @@ import { buildMainSessionContext, type MainSessionContextPayload } from "./main-
 import { MainSessionTracker } from "./main-session-state.js";
 import { attachOverlayBridge, JarvisOverlayBridge, JarvisOverlayComponent, type JarvisDisplayEntry, type JarvisOverlayView } from "./overlay.js";
 import { createJarvisSessionRef, readJarvisSessionRef, JARVIS_SESSION_REF_CUSTOM_TYPE, type JarvisSessionRef } from "./session-ref.js";
+import { clearJarvisModelSelectionSetting, loadJarvisModelSelectionSetting, saveJarvisModelSelectionSetting, type JarvisModelSelectionScope, type StoredJarvisModelSelection } from "./jarvis-config.js";
 import { JarvisSideSessionRuntime, createSideSessionFile } from "./side-session.js";
 
 type JarvisModelSelection =
 	| { mode: "follow-main" }
 	| { mode: "pinned"; model: Model<any> };
+
+type JarvisModelSelectionSource = JarvisModelSelectionScope | "default";
+
+type ParsedJarvisModelCommand = {
+	request: string;
+	scope: JarvisModelSelectionScope;
+	clearScope: boolean;
+};
+
+type ResolvedJarvisModelSelection = {
+	selection: JarvisModelSelection;
+	source: JarvisModelSelectionSource;
+	unavailable?: {
+		scope: JarvisModelSelectionScope;
+		modelReference: string;
+	};
+};
 
 type MainState = {
 	bridge: JarvisOverlayBridge;
@@ -29,6 +47,7 @@ type MainState = {
 	queuedMessages: string[];
 	model?: Model<any>;
 	jarvisModelSelection: JarvisModelSelection;
+	jarvisModelSelectionSource: JarvisModelSelectionSource;
 	thinkingLevel?: string;
 	systemPrompt: string;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
@@ -46,6 +65,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		lastJarvisSeenMainContext: undefined,
 		queuedMessages: [],
 		jarvisModelSelection: { mode: "follow-main" },
+		jarvisModelSelectionSource: "default",
 		systemPrompt: "",
 		themeProvider: () => {
 			throw new Error("/jarvis theme requested before UI was available.");
@@ -101,7 +121,17 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		description: "Set the model used by /jarvis without changing the main agent model",
 		handler: async (args, ctx) => {
 			updateContextState(pi, state, ctx);
-			const request = args.trim();
+
+			let parsedCommand: ParsedJarvisModelCommand;
+			try {
+				parsedCommand = parseJarvisModelCommand(args);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				return;
+			}
+
+			const { request, scope, clearScope } = parsedCommand;
+			const scopeLabel = formatJarvisModelSelectionScope(scope);
 
 			const selectModelFromMenu = async (initialSearchInput?: string): Promise<Model<any> | undefined> => {
 				const selectorSettingsManager = SettingsManager.inMemory();
@@ -120,41 +150,102 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 				);
 			};
 
+			const rollbackSelection = async (
+				previousSelection: JarvisModelSelection,
+				previousSource: JarvisModelSelectionSource,
+			): Promise<void> => {
+				await applyJarvisModelSelection(state, previousSelection);
+				state.jarvisModelSelectionSource = previousSource;
+			};
+
+			const persistSelection = async (selection: JarvisModelSelection): Promise<void> => {
+				const previousSelection = state.jarvisModelSelection;
+				const previousSource = state.jarvisModelSelectionSource;
+				await applyJarvisModelSelection(state, selection);
+				try {
+					saveJarvisModelSelectionSetting(ctx.cwd, scope, toStoredJarvisModelSelection(selection));
+					state.jarvisModelSelectionSource = scope;
+				} catch (error) {
+					await rollbackSelection(previousSelection, previousSource);
+					throw error;
+				}
+			};
+
+			const clearScopedSelection = async (): Promise<ResolvedJarvisModelSelection> => {
+				const previousSelection = state.jarvisModelSelection;
+				const previousSource = state.jarvisModelSelectionSource;
+				const projectSelection = scope === "project" ? undefined : loadJarvisModelSelectionSetting(ctx.cwd, "project");
+				const globalSelection = scope === "global" ? undefined : loadJarvisModelSelectionSetting(ctx.cwd, "global");
+				const resolvedSelection = resolveJarvisModelSelectionFromSettings(projectSelection, globalSelection, ctx.modelRegistry);
+				await applyJarvisModelSelection(state, resolvedSelection.selection);
+				try {
+					clearJarvisModelSelectionSetting(ctx.cwd, scope);
+					state.jarvisModelSelectionSource = resolvedSelection.source;
+					return resolvedSelection;
+				} catch (error) {
+					await rollbackSelection(previousSelection, previousSource);
+					throw error;
+				}
+			};
+
 			const pinSelectedModel = async (model: Model<any>): Promise<void> => {
 				try {
-					await applyJarvisModelSelection(state, { mode: "pinned", model });
+					await persistSelection({ mode: "pinned", model });
 				} catch (error) {
 					ctx.ui.notify(
-						`Failed to pin /jarvis to ${formatModelLabel(model)}: ${error instanceof Error ? error.message : String(error)}`,
+						`Failed to pin /jarvis to ${formatModelLabel(model)} ${scopeLabel}: ${error instanceof Error ? error.message : String(error)}`,
 						"error",
 					);
 					return;
 				}
 
 				ctx.ui.notify(
-					`Pinned /jarvis to ${formatModelLabel(model)}. The main model is still ${formatModelLabel(state.model)}.`,
+					`Pinned /jarvis to ${formatModelLabel(model)} ${scopeLabel}. The main model is still ${formatModelLabel(state.model)}.`,
 					"info",
 				);
 			};
 
-			if (request.toLowerCase() === "follow-main") {
+			if (clearScope) {
+				let resolvedSelection: ResolvedJarvisModelSelection;
 				try {
-					await applyJarvisModelSelection(state, { mode: "follow-main" });
+					resolvedSelection = await clearScopedSelection();
 				} catch (error) {
 					ctx.ui.notify(
-						`Failed to switch /jarvis back to follow-main: ${error instanceof Error ? error.message : String(error)}`,
+						`Failed to clear the /jarvis model setting ${scopeLabel}: ${error instanceof Error ? error.message : String(error)}`,
 						"error",
 					);
 					return;
 				}
-				ctx.ui.notify(`Set /jarvis to follow the main model (${formatModelLabel(state.model)}).`, "info");
+
+				if (resolvedSelection.unavailable) {
+					ctx.ui.notify(
+						`Configured /jarvis model ${resolvedSelection.unavailable.modelReference} from the ${resolvedSelection.unavailable.scope} setting is unavailable. Falling back to follow-main.`,
+						"warning",
+					);
+				}
+
+				ctx.ui.notify(`Cleared the /jarvis model setting ${scopeLabel}. /jarvis is now ${describeJarvisModelSelection(state)}.`, "info");
+				return;
+			}
+
+			if (request.toLowerCase() === "follow-main") {
+				try {
+					await persistSelection({ mode: "follow-main" });
+				} catch (error) {
+					ctx.ui.notify(
+						`Failed to switch /jarvis back to follow-main ${scopeLabel}: ${error instanceof Error ? error.message : String(error)}`,
+						"error",
+					);
+					return;
+				}
+				ctx.ui.notify(`Set /jarvis to follow the main model (${formatModelLabel(state.model)}) ${scopeLabel}.`, "info");
 				return;
 			}
 
 			if (!request) {
 				if (!ctx.hasUI) {
 					ctx.ui.notify(
-						`/jarvis is ${describeJarvisModelSelection(state)}. Use /jarvis-model follow-main or /jarvis-model <provider/model>.`,
+						`/jarvis is ${describeJarvisModelSelection(state)}. Use /jarvis-model [--project|--global] clear, /jarvis-model [--project|--global] follow-main, or /jarvis-model [--project|--global] <provider/model>.`,
 						"info",
 					);
 					return;
@@ -179,7 +270,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 				const errorMessage =
 					availableModels.length === 0
 						? "No /jarvis models are currently available from the main model registry."
-						: `Unknown /jarvis model "${request}". Use /jarvis-model follow-main or an exact provider/model from the current model registry.`;
+						: `Unknown /jarvis model "${request}". Use /jarvis-model [--project|--global] clear, /jarvis-model [--project|--global] follow-main, or an exact provider/model from the current model registry.`;
 				ctx.ui.notify(errorMessage, "error");
 				return;
 			}
@@ -199,14 +290,33 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		state.flushPromise = undefined;
 		state.queuedMessages = [];
 		state.lastJarvisSeenMainContext = undefined;
-		state.jarvisModelSelection = { mode: "follow-main" };
 		state.allowSideTools = false;
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
 		state.mainSession.reset(formatModelLabel(ctx.model));
+		const branchEntries = ctx.sessionManager.getBranch();
+		state.sessionRef = readJarvisSessionRef(branchEntries);
+
+		let resolvedSelection: ResolvedJarvisModelSelection = {
+			selection: { mode: "follow-main" },
+			source: "default",
+		};
+		try {
+			resolvedSelection = resolveConfiguredJarvisModelSelection(ctx.cwd, ctx.modelRegistry);
+		} catch (error) {
+			ctx.ui.notify(`Failed to load /jarvis model settings: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+
+		state.jarvisModelSelection = resolvedSelection.selection;
+		state.jarvisModelSelectionSource = resolvedSelection.source;
 		updateContextState(pi, state, ctx);
 		enforceCompatibilityGuard(state);
-		state.sessionRef = readJarvisSessionRef(ctx.sessionManager.getBranch());
+		if (resolvedSelection.unavailable) {
+			ctx.ui.notify(
+				`Configured /jarvis model ${resolvedSelection.unavailable.modelReference} from the ${resolvedSelection.unavailable.scope} setting is unavailable. Falling back to follow-main.`,
+				"warning",
+			);
+		}
 		state.bridge.reset();
 	});
 
@@ -276,6 +386,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		state.queuedMessages = [];
 		state.lastJarvisSeenMainContext = undefined;
 		state.jarvisModelSelection = { mode: "follow-main" };
+		state.jarvisModelSelectionSource = "default";
 		state.allowSideTools = false;
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
@@ -313,6 +424,109 @@ function getDesiredJarvisThinkingLevel(state: MainState): string | undefined {
 	return state.jarvisModelSelection.mode === "follow-main" ? state.thinkingLevel : "off";
 }
 
+function toStoredJarvisModelSelection(selection: JarvisModelSelection): StoredJarvisModelSelection {
+	return selection.mode === "follow-main"
+		? { mode: "follow-main" }
+		: { mode: "pinned", provider: selection.model.provider, modelId: selection.model.id };
+}
+
+function formatJarvisModelSelectionSource(source: JarvisModelSelectionSource): string {
+	if (source === "project") {
+		return "project setting";
+	}
+	if (source === "global") {
+		return "global setting";
+	}
+	return "default";
+}
+
+function formatJarvisModelSelectionScope(scope: JarvisModelSelectionScope): string {
+	return scope === "project" ? "for this project" : "globally";
+}
+
+function parseJarvisModelCommand(args: string): ParsedJarvisModelCommand {
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	let scope: JarvisModelSelectionScope = "project";
+	let scopeExplicitlySet = false;
+	const requestTokens: string[] = [];
+
+	for (const token of tokens) {
+		if (token === "--project" || token === "--global") {
+			if (scopeExplicitlySet) {
+				throw new Error("Choose only one scope flag: --project or --global.");
+			}
+			scope = token === "--global" ? "global" : "project";
+			scopeExplicitlySet = true;
+			continue;
+		}
+		requestTokens.push(token);
+	}
+
+	const request = requestTokens.join(" " );
+	return {
+		request,
+		scope,
+		clearScope: request.toLowerCase() === "clear",
+	};
+}
+
+function resolveStoredJarvisModelSelection(
+	storedSelection: StoredJarvisModelSelection,
+	source: JarvisModelSelectionSource,
+	modelRegistry: ExtensionContext["modelRegistry"],
+): ResolvedJarvisModelSelection {
+	if (storedSelection.mode === "follow-main") {
+		return {
+			selection: { mode: "follow-main" },
+			source,
+		};
+	}
+
+	const restoredModel = modelRegistry.find(storedSelection.provider, storedSelection.modelId);
+	if (!restoredModel) {
+		return {
+			selection: { mode: "follow-main" },
+			source: "default",
+			unavailable: {
+				scope: source === "default" ? "project" : source,
+				modelReference: `${storedSelection.provider}/${storedSelection.modelId}`,
+			},
+		};
+	}
+
+	return {
+		selection: { mode: "pinned", model: restoredModel },
+		source,
+	};
+}
+
+function resolveJarvisModelSelectionFromSettings(
+	projectSelection: StoredJarvisModelSelection | undefined,
+	globalSelection: StoredJarvisModelSelection | undefined,
+	modelRegistry: ExtensionContext["modelRegistry"],
+): ResolvedJarvisModelSelection {
+	if (projectSelection) {
+		return resolveStoredJarvisModelSelection(projectSelection, "project", modelRegistry);
+	}
+	if (globalSelection) {
+		return resolveStoredJarvisModelSelection(globalSelection, "global", modelRegistry);
+	}
+	return {
+		selection: { mode: "follow-main" },
+		source: "default",
+	};
+}
+
+function resolveConfiguredJarvisModelSelection(
+	cwd: string,
+	modelRegistry: ExtensionContext["modelRegistry"],
+): ResolvedJarvisModelSelection {
+	const projectSelection = loadJarvisModelSelectionSetting(cwd, "project");
+	const globalSelection = loadJarvisModelSelectionSetting(cwd, "global");
+	return resolveJarvisModelSelectionFromSettings(projectSelection, globalSelection, modelRegistry);
+}
+
+
 function isModelBridgeCompatible(model: Model<any> | undefined): boolean {
 	if (!model) {
 		return true;
@@ -338,9 +552,10 @@ function getJarvisModelModeLabel(selection: JarvisModelSelection): string {
 
 function describeJarvisModelSelection(state: MainState): string {
 	const activeModelLabel = formatModelLabel(getDesiredJarvisModel(state));
+	const sourceLabel = formatJarvisModelSelectionSource(state.jarvisModelSelectionSource);
 	return state.jarvisModelSelection.mode === "follow-main"
-		? `following the main model (${activeModelLabel})`
-		: `pinned to ${activeModelLabel}`;
+		? `following the main model (${activeModelLabel}; ${sourceLabel})`
+		: `pinned to ${activeModelLabel} (${sourceLabel})`;
 }
 
 function getAvailableJarvisModels(modelRegistry: ExtensionContext["modelRegistry"]): readonly Model<any>[] {
@@ -411,6 +626,12 @@ async function applyJarvisModelSelection(state: MainState, selection: JarvisMode
 		enforceCompatibilityGuard(state);
 	} catch (error) {
 		state.jarvisModelSelection = previousSelection;
+		try {
+			await syncRuntimeModelSelection(state);
+			enforceCompatibilityGuard(state);
+		} catch {
+			// Keep the original sync failure; rollback is best-effort only.
+		}
 		throw error;
 	}
 }
