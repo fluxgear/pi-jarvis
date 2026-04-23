@@ -53,6 +53,11 @@ export interface JarvisOverlaySnapshot {
 	pendingConfirmation?: JarvisPendingConfirmation;
 }
 
+interface TranscriptBlock {
+	lines: string[];
+	preserveHeaderWhenClipped: boolean;
+}
+
 export class JarvisOverlayBridge {
 	private requestRender?: () => void;
 	private statuses = new Map<string, string>();
@@ -306,8 +311,8 @@ export class JarvisOverlayComponent implements Component, Focusable {
 
 	private renderConfirmation(confirmation: JarvisPendingConfirmation, innerWidth: number): string[] {
 		const lines: string[] = [];
-		lines.push(this.theme.bold(this.theme.fg("warning", `▶ ${confirmation.title}`)));
-		for (const rawLine of confirmation.message.split("\n")) {
+		lines.push(this.theme.bold(this.theme.fg("warning", `▶ ${sanitizeOverlayDisplayText(confirmation.title)}`)));
+		for (const rawLine of sanitizeOverlayDisplayText(confirmation.message).split("\n")) {
 			if (rawLine.length === 0) {
 				lines.push("");
 				continue;
@@ -326,17 +331,17 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	}
 
 	private renderHeader(innerWidth: number): string[] {
-		const mainStatus = this.view.getMainStatusLabel();
+		const mainStatus = sanitizeOverlayDisplayText(this.view.getMainStatusLabel());
 		const mainStatusColor = mainStatus === "busy" ? "warning" : "success";
 		const toolsToggle = this.renderToggle("Repo tools", this.view.isToolAccessEnabled(), this.focused && this.focusTarget === "tools");
 		const followUpToggle = this.renderToggle("Note main", this.view.isFollowUpToMainEnabled(), this.focused && this.focusTarget === "followUp");
 		const steerToggle = this.renderToggle("Redirect", this.view.isSteerToMainEnabled(), this.focused && this.focusTarget === "steer");
-		const mainModel = this.view.getMainModelLabel();
-		const sideModel = this.view.getModelLabel();
-		const modelMode = this.view.getModelModeLabel();
-		const focus = this.view.getMainFocusLabel();
-		const delta = this.view.getMainDeltaLabel();
-		const repoToolsDetail = this.view.getRepoToolsDetailLabel();
+		const mainModel = sanitizeOverlayDisplayText(this.view.getMainModelLabel());
+		const sideModel = sanitizeOverlayDisplayText(this.view.getModelLabel());
+		const modelMode = sanitizeOverlayDisplayText(this.view.getModelModeLabel());
+		const focus = sanitizeOverlayDisplayText(this.view.getMainFocusLabel());
+		const delta = sanitizeOverlayDisplayText(this.view.getMainDeltaLabel());
+		const repoToolsDetail = sanitizeOverlayDisplayText(this.view.getRepoToolsDetailLabel());
 		return [
 			truncateToWidth(
 				`${this.theme.bold(this.theme.fg("accent", "Jarvis"))} ${this.theme.fg("muted", "·")} ${this.theme.fg("accent", "Main")} ${this.theme.fg(mainStatusColor, mainStatus)}`,
@@ -361,7 +366,7 @@ export class JarvisOverlayComponent implements Component, Focusable {
 			return [];
 		}
 
-		const lines: string[] = [];
+		const blocks: TranscriptBlock[] = [];
 		const displayEntries = this.view.getDisplayEntries();
 		const showAnimatedThinkingFallback = Boolean(snapshot.workingMessage && this.view.isStreaming());
 		this.syncThinkingAnimation(showAnimatedThinkingFallback);
@@ -370,33 +375,34 @@ export class JarvisOverlayComponent implements Component, Focusable {
 			if (
 				previousKind !== undefined && previousKind !== entry.kind && previousKind !== "system" && entry.kind !== "system"
 			) {
-				lines.push("");
+				blocks.push({ lines: [""], preserveHeaderWhenClipped: false });
 			}
-			lines.push(...this.renderEntry(entry, innerWidth));
+			blocks.push(this.createTranscriptBlock(this.renderEntry(entry, innerWidth), entry.kind !== "system"));
 			previousKind = entry.kind;
 		}
 		if (showAnimatedThinkingFallback) {
-			lines.push(...this.renderAnimatedThinkingFallback(innerWidth, snapshot.workingMessage!));
+			blocks.push(this.createTranscriptBlock(this.renderAnimatedThinkingFallback(innerWidth, snapshot.workingMessage!), false));
 		}
 		for (const status of snapshot.statuses) {
-			lines.push(...this.wrapBlock(status, innerWidth));
+			blocks.push(this.createTranscriptBlock(this.wrapBlock(sanitizeOverlayDisplayText(status), innerWidth), false));
 		}
-		return lines.slice(-budget);
+		return this.clipTranscriptBlocks(blocks, budget);
 	}
 
 	private renderEntry(entry: JarvisDisplayEntry, innerWidth: number): string[] {
+		const safeText = sanitizeOverlayDisplayText(entry.text);
 		switch (entry.kind) {
 			case "user":
-				return this.wrapWithPrefix(this.theme.fg("accent", "User:"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("accent", "User:"), safeText, innerWidth);
 			case "assistant":
-				return this.wrapWithPrefix(this.theme.fg("success", "Jarvis:"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("success", "Jarvis:"), safeText, innerWidth);
 			case "tool":
-				return this.wrapWithPrefix(this.theme.fg("warning", "Tool:"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("warning", "Tool:"), safeText, innerWidth);
 			case "status":
-				return this.wrapWithPrefix(this.theme.fg("muted", "Note:"), entry.text, innerWidth);
+				return this.wrapWithPrefix(this.theme.fg("muted", "Note:"), safeText, innerWidth);
 			case "system":
 			default:
-				return this.wrapBlock(this.theme.fg("muted", entry.text), innerWidth);
+				return this.wrapBlock(this.theme.fg("muted", safeText), innerWidth);
 		}
 	}
 
@@ -407,13 +413,43 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		return truncateToWidth(prefix + rendered, innerWidth, "", true);
 	}
 
+	private createTranscriptBlock(lines: string[], preserveHeaderWhenClipped: boolean): TranscriptBlock {
+		return { lines, preserveHeaderWhenClipped };
+	}
+
+	private clipTranscriptBlocks(blocks: readonly TranscriptBlock[], budget: number): string[] {
+		const visible: string[] = [];
+		let remaining = budget;
+		for (let i = blocks.length - 1; i >= 0 && remaining > 0; i--) {
+			const block = blocks[i];
+			if (block.lines.length <= remaining) {
+				visible.unshift(...block.lines);
+				remaining -= block.lines.length;
+				continue;
+			}
+			visible.unshift(...this.clipTranscriptBlock(block, remaining));
+			break;
+		}
+		return visible;
+	}
+
+	private clipTranscriptBlock(block: TranscriptBlock, budget: number): string[] {
+		if (block.lines.length <= budget) {
+			return [...block.lines];
+		}
+		if (block.preserveHeaderWhenClipped && budget > 1) {
+			return [block.lines[0] ?? "", ...block.lines.slice(-(budget - 1))];
+		}
+		return block.lines.slice(-budget);
+	}
+
 	private notificationLines(items: readonly NotificationItem[], innerWidth: number): string[] {
 		const recent = items.slice(-2);
 		const lines: string[] = [];
 		for (const item of recent) {
 			const color = item.type === "error" ? "error" : item.type === "warning" ? "warning" : "muted";
 			lines.push(this.sectionDivider("Notice", innerWidth));
-			lines.push(...this.wrapBlock(this.theme.fg(color, item.message), innerWidth));
+			lines.push(...this.wrapBlock(this.theme.fg(color, sanitizeOverlayDisplayText(item.message)), innerWidth));
 		}
 		return lines;
 	}
@@ -477,7 +513,7 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	private renderAnimatedThinkingFallback(innerWidth: number, message: string): string[] {
 		const icons = ["◈", "◆", "◇", "✦", "✧", "✦"];
 		const icon = icons[this.thinkingAnimationTick % icons.length] ?? "◈";
-		const shimmerText = this.renderShimmeringThinkingText(message);
+		const shimmerText = this.renderShimmeringThinkingText(sanitizeOverlayDisplayText(message));
 		return this.wrapBlock(`${this.theme.bold(this.theme.fg("accent", icon))} ${shimmerText}`, innerWidth);
 	}
 
@@ -532,6 +568,16 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	private overlayBackground(text: string): string {
 		return `\x1b[48;2;24;28;36m${text}\x1b[0m`;
 	}
+}
+
+function sanitizeOverlayDisplayText(text: string): string {
+	return text
+		.replace(/\r/g, "")
+		.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
+		.replace(/\x1b[P^_X][\s\S]*?\x1b\\/g, "")
+		.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+		.replace(/[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g, "")
+		.replace(/\x1b/g, "");
 }
 
 export function attachOverlayBridge(component: JarvisOverlayComponent, bridge: JarvisOverlayBridge, tui: TUI): JarvisOverlayComponent {

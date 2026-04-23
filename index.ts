@@ -43,6 +43,7 @@ type MainState = {
 	sessionRef?: JarvisSessionRef;
 	runtime?: JarvisSideSessionRuntime;
 	bootPromise?: Promise<JarvisSideSessionRuntime>;
+	bootGeneration: number;
 	flushPromise?: Promise<void>;
 	queuedMessages: string[];
 	model?: Model<any>;
@@ -55,6 +56,17 @@ type MainState = {
 	allowFollowUpToMain: boolean;
 	allowSteerToMain: boolean;
 };
+
+class StaleJarvisBootError extends Error {
+	constructor() {
+		super("/jarvis startup was superseded by a newer session lifecycle event.");
+		this.name = "StaleJarvisBootError";
+	}
+}
+
+function isStaleJarvisBootError(error: unknown): error is StaleJarvisBootError {
+	return error instanceof StaleJarvisBootError;
+}
 
 export default function jarvisExtension(pi: ExtensionAPI): void {
 	const mainSession = new MainSessionTracker();
@@ -73,6 +85,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		allowSideTools: false,
 		allowFollowUpToMain: false,
 		allowSteerToMain: false,
+		bootGeneration: 0,
 	};
 
 	pi.registerCommand("jarvis", {
@@ -81,6 +94,9 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 			updateContextState(pi, state, ctx);
 
 			void ensureRuntime(pi, state, ctx).catch((error) => {
+				if (isStaleJarvisBootError(error)) {
+					return;
+				}
 				state.bridge.notify(error instanceof Error ? error.message : String(error), "error");
 			});
 
@@ -284,6 +300,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		state.bootGeneration += 1;
 		state.runtime?.dispose();
 		state.runtime = undefined;
 		state.bootPromise = undefined;
@@ -377,6 +394,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		state.bootGeneration += 1;
 		state.runtime?.dispose();
 		state.runtime = undefined;
 		state.bootPromise = undefined;
@@ -805,6 +823,9 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 				}
 			}
 		} catch (error) {
+			if (isStaleJarvisBootError(error)) {
+				return;
+			}
 			state.bridge.notify(`/jarvis startup failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
 	})().finally(() => {
@@ -822,13 +843,20 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 		return state.bootPromise;
 	}
 
+	const bootGeneration = state.bootGeneration;
+	const isCurrentBoot = () => state.bootGeneration === bootGeneration;
 	state.bridge.setWorkingMessage("Starting /jarvis…");
-	state.bootPromise = (async () => {
+	let bootPromise: Promise<JarvisSideSessionRuntime>;
+	bootPromise = (async () => {
 		let sessionFile = state.sessionRef?.file;
 		if (!sessionFile || !existsSync(sessionFile)) {
 			sessionFile = await createSideSessionFile(ctx.cwd);
-			state.sessionRef = createJarvisSessionRef(sessionFile);
-			pi.appendEntry(JARVIS_SESSION_REF_CUSTOM_TYPE, state.sessionRef);
+			if (!isCurrentBoot()) {
+				throw new StaleJarvisBootError();
+			}
+			const sessionRef = createJarvisSessionRef(sessionFile);
+			state.sessionRef = sessionRef;
+			pi.appendEntry(JARVIS_SESSION_REF_CUSTOM_TYPE, sessionRef);
 		}
 
 		const runtime = await JarvisSideSessionRuntime.create({
@@ -865,6 +893,11 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 			themeProvider: state.themeProvider,
 		});
 
+		if (!isCurrentBoot()) {
+			runtime.dispose();
+			throw new StaleJarvisBootError();
+		}
+
 		state.runtime = runtime;
 		state.bridge.setWorkingMessage(undefined);
 		return runtime;
@@ -872,10 +905,13 @@ async function ensureRuntime(pi: ExtensionAPI, state: MainState, ctx: ExtensionC
 		state.bridge.setWorkingMessage(undefined);
 		throw error;
 	}).finally(() => {
-		state.bootPromise = undefined;
+		if (state.bootPromise === bootPromise) {
+			state.bootPromise = undefined;
+		}
 	});
+	state.bootPromise = bootPromise;
 
-	return state.bootPromise;
+	return bootPromise;
 }
 
 function formatModelLabel(model: Model<any> | undefined): string {

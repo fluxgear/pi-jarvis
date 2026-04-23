@@ -187,6 +187,19 @@ async function testSessionRef(): Promise<void> {
 	assert.equal(readJarvisSessionRef([]), undefined);
 }
 
+async function testSessionRefDoesNotFallbackPastMalformedNewestEntry(): Promise<void> {
+	const olderRef = createJarvisSessionRef("/tmp/older-jarvis.jsonl");
+	const loaded = readJarvisSessionRef([
+		{ type: "custom", customType: JARVIS_SESSION_REF_CUSTOM_TYPE, data: olderRef },
+		{ type: "custom", customType: JARVIS_SESSION_REF_CUSTOM_TYPE, data: { version: 2, file: "/tmp/newer-jarvis.jsonl" } },
+	]);
+	assert.equal(
+		loaded,
+		undefined,
+		"the newest malformed /jarvis session ref should fail closed instead of reconnecting to an older side-session file",
+	);
+}
+
 async function testJarvisModelConfigRoundTrip(): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-config-test-"));
@@ -335,6 +348,79 @@ async function testOverlayAnimatedThinkingFallback(): Promise<void> {
 	const stripAnsi = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
 	assert.ok(lines.some((line) => stripAnsi(line).includes("Thinking...")), "animated fallback should keep the Thinking... label visible");
 	assert.ok(lines.some((line) => line.includes("◈")), "animated fallback should include the metallic thinking icon");
+	overlay.dispose();
+}
+
+async function testOverlayClippedTranscriptPreservesSpeakerLabel(): Promise<void> {
+	const terminal = new FakeTerminal();
+	terminal.resize(40, 20);
+	const tui = new TUI(terminal);
+	const bridge = new JarvisOverlayBridge();
+	const { view } = createTestOverlayView({
+		displayEntries: [{ kind: "assistant", text: "Long clipped transcript ".repeat(40) }],
+	});
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
+	const lines = overlay.render(34);
+	const conversationDivider = lines.findIndex((line) => line.includes("Conversation"));
+	assert.ok(conversationDivider >= 0, "overlay should render a conversation divider");
+	const promptDivider = lines.findIndex((line) => line.includes("Prompt"));
+	const transcriptLine = lines
+		.slice(conversationDivider + 1, promptDivider >= 0 ? promptDivider : undefined)
+		.find((line) => line.includes("Jarvis:") || line.includes("Long clipped transcript"));
+	assert.ok(transcriptLine?.includes("Jarvis:"), "the first visible clipped transcript line should retain the speaker label");
+	overlay.dispose();
+}
+
+async function testOverlaySanitizesDisplayControlSequences(): Promise<void> {
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
+	const bridge = new JarvisOverlayBridge();
+	const { view } = createTestOverlayView({
+		displayEntries: [
+			{ kind: "assistant", text: "prefix \x1b[2J suffix" },
+			{ kind: "assistant", text: "hyperlink \x1b]8;;https://example.com\x07label\x1b]8;;\x07 suffix" },
+		],
+	});
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
+	const lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("prefix  suffix")), "overlay should keep the visible assistant text after sanitizing CSI control sequences");
+	assert.ok(lines.some((line) => line.includes("hyperlink label suffix")), "overlay should keep visible text while stripping OSC-style control sequences");
+	assert.ok(!lines.some((line) => line.includes("\x1b[2J")), "overlay should strip raw CSI terminal control sequences from transcript content");
+	assert.ok(!lines.some((line) => line.includes("https://example.com")), "overlay should strip OSC payloads such as terminal hyperlinks from transcript content");
+	overlay.dispose();
+}
+
+async function testOverlaySanitizesNonTranscriptUiText(): Promise<void> {
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
+	const bridge = new JarvisOverlayBridge();
+	bridge.notify("notice \x1b]8;;https://example.com\x07label\x1b]8;;\x07");
+	bridge.setStatus("status", "status \x1b[2J line");
+	const { view } = createTestOverlayView({ displayEntries: [] });
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
+	const confirmation = bridge.requestConfirmation("title \x1b[2J", "body \x1b]8;;https://example.com\x07label\x1b]8;;\x07");
+	const lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("notice label")), "overlay should sanitize notices before rendering them");
+	assert.ok(lines.some((line) => line.includes("status  line")), "overlay should sanitize bridge status text before rendering it");
+	assert.ok(lines.some((line) => line.includes("title ")), "overlay should sanitize confirmation titles before rendering them");
+	assert.ok(lines.some((line) => line.includes("body label")), "overlay should sanitize confirmation bodies before rendering them");
+	assert.ok(!lines.some((line) => line.includes("\x1b[2J") || line.includes("https://example.com")), "overlay should not render raw control-sequence payloads anywhere in the UI");
+	bridge.resolveConfirmation(false);
+	await confirmation;
+	overlay.dispose();
+}
+
+async function testOverlaySanitizesWorkingMessageText(): Promise<void> {
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
+	const bridge = new JarvisOverlayBridge();
+	bridge.setWorkingMessage("thinking \x1b[2J now");
+	const { view } = createTestOverlayView({ streaming: true, displayEntries: [] });
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
+	const lines = overlay.render(80);
+	const stripAnsi = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+	assert.ok(lines.some((line) => stripAnsi(line).includes("thinking  now")), "overlay should sanitize animated working-message text before rendering it");
+	assert.ok(!lines.some((line) => line.includes("\x1b[2J")), "overlay should not render raw control sequences inside the animated working message");
 	overlay.dispose();
 }
 
@@ -508,6 +594,7 @@ async function testSideSessionPersistence(): Promise<void> {
 			sendFollowUpToMain: () => {},
 			confirmSteerToMain: async () => false,
 			sendSteerToMain: () => {},
+			mcpExtensionPathProvider: () => undefined,
 			themeProvider: () => theme,
 		});
 		const entries = runtime.getDisplayEntries().map((entry) => entry.text);
@@ -734,6 +821,7 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 			sendFollowUpToMain: () => {},
 			confirmSteerToMain: async () => false,
 			sendSteerToMain: () => {},
+			mcpExtensionPathProvider: () => undefined,
 			themeProvider: () => theme,
 		});
 
@@ -1556,6 +1644,46 @@ async function testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText(): Promis
 	assert.ok(context.recentText.includes('read {"path":"index.ts"}'), "the recent main-session window should still include the current tool activity");
 }
 
+async function testBuildMainSessionContextIncludesPlainStringAssistantContentInRecentWindow(): Promise<void> {
+	const context = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: undefined,
+		latestAssistantText: "Plain assistant text",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [
+			{
+				type: "message",
+				id: "assistant-string",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: "Plain assistant text",
+					api: "test-api",
+					provider: "test-provider",
+					model: "test-model",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+					stopReason: "stop",
+					timestamp: 0,
+				},
+			} as any,
+		],
+	});
+
+	assert.equal(context.summary.latestAssistantText, "Plain assistant text");
+	assert.ok(
+		context.recentEntries.some((entry) => entry.kind === "assistant" && entry.text === "Plain assistant text"),
+		"plain-string assistant turns should remain visible in the recent main-session window",
+	);
+	assert.ok(context.recentText.includes("Jarvis" ) === false, "recent main-session text should stay raw and not inject overlay speaker labels");
+	assert.ok(context.recentText.includes("Plain assistant text"), "the formatted recent main-session text should include plain-string assistant content");
+	assert.ok(!context.recentText.includes("Recent main session: none"), "recent main-session text should not collapse to none when the latest assistant turn is a plain string");
+}
+
 async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
 	type PackageManifest = {
 		main?: string;
@@ -1576,6 +1704,14 @@ async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
 	assert.equal((packageJson.exports?.["."] as { default?: string; types?: string } | undefined)?.default, "./dist/index.js");
 	assert.equal((packageJson.exports?.["."] as { default?: string; types?: string } | undefined)?.types, "./dist/index.d.ts");
 	assert.equal(packageJson.exports?.["./package.json"], "./package.json", "package.json should keep exporting its own manifest");
+}
+
+async function testGitIgnoreCoversProjectPiArtifacts(): Promise<void> {
+	const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
+	assert.ok(
+		gitignore.split(/\r?\n/).includes(".pi/"),
+		".gitignore should ignore project-local .pi artifacts such as .pi/jarvis.json",
+	);
 }
 
 type BridgeToolDefinition = {
@@ -1788,7 +1924,11 @@ class FakeJarvisRuntime {
 		this.currentModel = model;
 	}
 
-	dispose(): void {}
+	disposed = false;
+
+	dispose(): void {
+		this.disposed = true;
+	}
 }
 
 type JarvisExtensionHarness = {
@@ -2182,6 +2322,61 @@ async function testJarvisOverlaySkipsReconnectTextForMissingSessionRef(): Promis
 			if (pendingRuntime && resolveCreate) {
 				resolveCreate(pendingRuntime as unknown as JarvisSideSessionRuntime);
 				await waitForAsyncWork();
+			}
+		}
+	});
+}
+
+async function testJarvisBootInvalidatedBySessionRestartDoesNotReuseStaleRuntime(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const previousCreate = JarvisSideSessionRuntime.create;
+		const pendingCreates: Array<{
+			runtime: FakeJarvisRuntime;
+			resolve: (runtime: JarvisSideSessionRuntime) => void;
+		}> = [];
+		let createCalls = 0;
+
+		(JarvisSideSessionRuntime as { create: typeof JarvisSideSessionRuntime.create }).create = async (options) => {
+			createCalls += 1;
+			const runtime = new FakeJarvisRuntime(options.model as TestModel | undefined, options.thinkingLevel);
+			return await new Promise<JarvisSideSessionRuntime>((resolve) => {
+				pendingCreates.push({ resolve, runtime });
+			});
+		};
+
+		try {
+			await harness.api.runCommand("jarvis", "", harness.ctx);
+			assert.equal(createCalls, 1, "opening /jarvis should start exactly one boot");
+
+			await harness.api.emit("session_shutdown", {}, harness.ctx);
+			await harness.api.emit("session_start", {}, harness.ctx);
+
+			await harness.api.runCommand("jarvis", "", harness.ctx);
+			assert.equal(createCalls, 2, "reopening /jarvis after restart should start a fresh boot");
+
+			pendingCreates[0]?.resolve(pendingCreates[0].runtime as unknown as JarvisSideSessionRuntime);
+			await waitForAsyncWork();
+			assert.equal(pendingCreates[0]?.runtime.disposed, true, "a stale completed boot should dispose its runtime instead of reattaching it");
+
+			await harness.api.runCommand("jarvis", "", harness.ctx);
+			assert.equal(createCalls, 2, "the newer boot promise should survive the stale boot finishing and be reused while still pending");
+
+			pendingCreates[1]?.resolve(pendingCreates[1].runtime as unknown as JarvisSideSessionRuntime);
+			await waitForAsyncWork();
+			assert.equal(pendingCreates[1]?.runtime.disposed, false, "the current boot should stay live once it completes");
+
+			await harness.api.runCommand("jarvis", "", harness.ctx);
+			await waitForAsyncWork();
+			assert.equal(createCalls, 2, "once the replacement runtime is live, /jarvis should reuse it instead of booting again");
+			assert.equal(
+				harness.ctx.notifications.filter((notification) => notification.type === "error").length,
+				0,
+				"session restart invalidation should not surface a spurious startup error to the user",
+			);
+		} finally {
+			(JarvisSideSessionRuntime as { create: typeof JarvisSideSessionRuntime.create }).create = previousCreate;
+			for (const pending of pendingCreates) {
+				pending.resolve(pending.runtime as unknown as JarvisSideSessionRuntime);
 			}
 		}
 	});
@@ -2587,6 +2782,7 @@ async function testFollowUpToolPermissionGating(): Promise<void> {
 			},
 			confirmSteerToMain: async () => false,
 			sendSteerToMain: () => {},
+			mcpExtensionPathProvider: () => undefined,
 			themeProvider: () => theme,
 		});
 
@@ -2659,6 +2855,7 @@ async function testSteerToolPermissionAndConfirmGating(): Promise<void> {
 			sendSteerToMain: (message) => {
 				sentSteer = message;
 			},
+			mcpExtensionPathProvider: () => undefined,
 			themeProvider: () => theme,
 		});
 
@@ -2891,6 +3088,7 @@ async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 			sendSteerToMain: (message) => {
 				sentSteer = message;
 			},
+			mcpExtensionPathProvider: () => undefined,
 			themeProvider: () => theme,
 		});
 
@@ -3005,12 +3203,17 @@ async function testMainSessionTrackerAnonymousSameNameToolExecutionsDoNotCollaps
 }
 async function main(): Promise<void> {
 	await testSessionRef();
+	await testSessionRefDoesNotFallbackPastMalformedNewestEntry();
 	await testJarvisModelConfigRoundTrip();
 	await testMalformedProjectJarvisModelConfigCanBeCleared();
 	await testMalformedGlobalJarvisModelConfigCanBeCleared();
 	await testOverlayFocusAndEscRouting();
 	await testOverlayRenderDistinctness();
 	await testOverlayAnimatedThinkingFallback();
+	await testOverlayClippedTranscriptPreservesSpeakerLabel();
+	await testOverlaySanitizesDisplayControlSequences();
+	await testOverlaySanitizesNonTranscriptUiText();
+	await testOverlaySanitizesWorkingMessageText();
 	await testOverlayForwardingToggleControls();
 	await testOverlayInputSwallowedOnToggleFocus();
 	await testJarvisOverlayInputHistoryNavigatesUserMessages();
@@ -3020,6 +3223,7 @@ async function main(): Promise<void> {
 	await testHandleMessageStartMarksAssistantStreaming();
 	await testMainSessionTrackerRefreshSkipsPreCompactionMessages();
 	await testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText();
+	await testBuildMainSessionContextIncludesPlainStringAssistantContentInRecentWindow();
 	await testMainSessionTrackerToolExecutionKeying();
 	await testMainSessionTrackerAnonymousSameNameToolExecutionsDoNotCollapse();
 	await testJarvisModelDefaultFollowMainBehavior();
@@ -3032,6 +3236,7 @@ async function main(): Promise<void> {
 	await testQueuedJarvisSendRetriesAfterTransientFailure();
 	await testJarvisOverlayToolToggleSyncsRuntime();
 	await testJarvisOverlaySkipsReconnectTextForMissingSessionRef();
+	await testJarvisBootInvalidatedBySessionRestartDoesNotReuseStaleRuntime();
 	await testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning();
 	await testJarvisModelReturnToFollowMainBehavior();
 	await testJarvisModelDefaultScopeWritesProjectConfig();
@@ -3062,6 +3267,7 @@ async function main(): Promise<void> {
 	await testSteerToolPermissionAndConfirmGating();
 	await testSteerConfirmationRoutedThroughBridge();
 	await testPackageManifestDeclaresPiPeerDependencies();
+	await testGitIgnoreCoversProjectPiArtifacts();
 	console.log("jarvis tests passed");
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "pi-jarvis",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "A /jarvis side-conversation overlay extension for Pi.",
   "type": "module",
   "main": "./dist/index.js",

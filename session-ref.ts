@@ -17,10 +17,7 @@ export function readJarvisSessionRef(entries: readonly BranchEntryLike[]): Jarvi
 		if (entry.type !== "custom" || entry.customType !== JARVIS_SESSION_REF_CUSTOM_TYPE) {
 			continue;
 		}
-		const ref = parseJarvisSessionRef(entry.data);
-		if (ref) {
-			return ref;
-		}
+		return parseJarvisSessionRef(entry.data);
 	}
 	return undefined;
 }

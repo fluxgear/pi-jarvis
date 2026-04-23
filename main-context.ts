@@ -610,6 +610,9 @@ function extractVisibleTextContent(content: unknown): string {
 }
 
 function extractAssistantText(content: unknown): string {
+	if (typeof content === "string") {
+		return content;
+	}
 	if (!Array.isArray(content)) {
 		return "";
 	}
