@@ -1635,7 +1635,7 @@ async function withSideSessionRuntime(
 			sendFollowUpToMain: overrides.sendFollowUpToMain ?? (() => {}),
 			confirmSteerToMain: overrides.confirmSteerToMain ?? (async () => false),
 			sendSteerToMain: overrides.sendSteerToMain ?? (() => {}),
-			mcpExtensionPathProvider: "mcpExtensionPath" in overrides ? () => overrides.mcpExtensionPath ?? undefined : undefined,
+			mcpExtensionPathProvider: () => ("mcpExtensionPath" in overrides ? overrides.mcpExtensionPath ?? undefined : undefined),
 			themeProvider: () => theme,
 		});
 		try {
@@ -2475,14 +2475,37 @@ async function testSideSessionToolWhitelist(): Promise<void> {
 }
 
 async function testSideSessionLocalToolsActivateWhenPermitted(): Promise<void> {
-	await withSideSessionRuntime({ toolAccessEnabled: true }, async (runtime, probe) => {
-		assert.ok(probe.session, "side session runtime should expose the underlying session");
-		const activeToolNames: string[] = probe.session!.getActiveToolNames().slice().sort();
-		for (const toolName of ["read", "bash", "edit", "write", "mcp"]) {
-			assert.ok(activeToolNames.includes(toolName), `/jarvis should expose ${toolName} when local tool access is enabled and MCP is available`);
-		}
-		assert.equal(runtime.getRepoToolsDetailLabel(), "local tools + MCP available");
-	});
+	const fakeExtensionRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-fake-mcp-extension-"));
+	const fakeExtensionPath = join(fakeExtensionRoot, "index.mjs");
+	writeFileSync(
+		fakeExtensionPath,
+		"export default function fakeMcp(pi) {\n" +
+			"  pi.registerTool({\n" +
+			"    name: 'mcp',\n" +
+			"    label: 'MCP',\n" +
+			"    description: 'Fake MCP test tool',\n" +
+			"    promptSnippet: 'Fake MCP test tool',\n" +
+			"    parameters: { type: 'object', properties: {} },\n" +
+			"    async execute() {\n" +
+			"      return { content: [{ type: 'text', text: 'fake mcp' }], details: { status: 'ok' } };\n" +
+			"    }\n" +
+			"  });\n" +
+			"}\n",
+		"utf8",
+	);
+
+	try {
+		await withSideSessionRuntime({ toolAccessEnabled: true, mcpExtensionPath: fakeExtensionPath }, async (runtime, probe) => {
+			assert.ok(probe.session, "side session runtime should expose the underlying session");
+			const activeToolNames: string[] = probe.session!.getActiveToolNames().slice().sort();
+			for (const toolName of ["read", "bash", "edit", "write", "mcp"]) {
+				assert.ok(activeToolNames.includes(toolName), `/jarvis should expose ${toolName} when local tool access is enabled and MCP is available`);
+			}
+			assert.equal(runtime.getRepoToolsDetailLabel(), "local tools + MCP available");
+		});
+	} finally {
+		rmSync(fakeExtensionRoot, { recursive: true, force: true });
+	}
 }
 
 async function testSideSessionLocalToolsReportMcpUnavailableWhenAdapterMissing(): Promise<void> {
