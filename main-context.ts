@@ -246,7 +246,7 @@ function findLatestValidationEntry(branchEntries: MainSessionSnapshot["branchEnt
 			continue;
 		}
 		const command = normalizeText(entry.message.command);
-		if (command === "npm run check" || command === "npm test" || command === "npm run build") {
+		if (command === "npm run check" || command === "npm test" || command === "npm run build" || command === "npm pack --dry-run") {
 			return entry as BashExecutionEntry;
 		}
 	}
@@ -359,13 +359,10 @@ function deriveMainSessionWorkState(snapshot: MainSessionSnapshot): MainSessionW
 	};
 }
 
-function looksCompleted(latestAssistantText: string | undefined, validationStatus: MainValidationStatus): boolean {
+function looksCompleted(latestAssistantText: string | undefined, _validationStatus: MainValidationStatus): boolean {
 	const normalized = normalizeText(latestAssistantText).toLowerCase();
 	if (!normalized) {
-		return validationStatus === "passed";
-	}
-	if (validationStatus === "passed") {
-		return true;
+		return false;
 	}
 	return /^(done|completed|finished|wrapped up|all set|implemented|fixed|updated)\b/.test(normalized);
 }
@@ -407,7 +404,7 @@ function getActiveValidationCommand(runningToolCalls: readonly MainSessionSnapsh
 			continue;
 		}
 		const command = typeof toolCall.args?.command === "string" ? normalizeText(toolCall.args.command) : "";
-		if (command === "npm run check" || command === "npm test" || command === "npm run build") {
+		if (command === "npm run check" || command === "npm test" || command === "npm run build" || command === "npm pack --dry-run") {
 			return command;
 		}
 	}

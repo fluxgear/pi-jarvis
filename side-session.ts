@@ -714,19 +714,20 @@ function extractAssistantText(message: AssistantMessage): string {
 function sanitizeAssistantOverlayText(text: string): string {
 	const normalizedLines = text.replace(/\r/g, "").split("\n").map((line) => line.trimEnd());
 	const visibleLines: string[] = [];
-	let expectToolArgumentsLine = false;
+	let skippingToolArguments = false;
 
 	for (const line of normalizedLines) {
 		const trimmed = line.trim();
 		if (isLeakedAssistantToolLine(trimmed)) {
-			expectToolArgumentsLine = true;
+			skippingToolArguments = true;
 			continue;
 		}
-		if (expectToolArgumentsLine && isLeakedAssistantToolParagraph(trimmed)) {
-			expectToolArgumentsLine = false;
+		if (skippingToolArguments) {
+			if (!trimmed) {
+				skippingToolArguments = false;
+			}
 			continue;
 		}
-		expectToolArgumentsLine = false;
 		visibleLines.push(line);
 	}
 

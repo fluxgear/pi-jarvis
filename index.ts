@@ -301,11 +301,9 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 			selection: { mode: "follow-main" },
 			source: "default",
 		};
-		try {
-			resolvedSelection = resolveConfiguredJarvisModelSelection(ctx.cwd, ctx.modelRegistry);
-		} catch (error) {
-			ctx.ui.notify(`Failed to load /jarvis model settings: ${error instanceof Error ? error.message : String(error)}`, "error");
-		}
+		resolvedSelection = resolveConfiguredJarvisModelSelection(ctx.cwd, ctx.modelRegistry, (scope, error) => {
+			ctx.ui.notify(`Failed to load the ${scope} /jarvis model setting: ${error instanceof Error ? error.message : String(error)}`, "error");
+		});
 
 		state.jarvisModelSelection = resolvedSelection.selection;
 		state.jarvisModelSelectionSource = resolvedSelection.source;
@@ -506,7 +504,20 @@ function resolveJarvisModelSelectionFromSettings(
 	modelRegistry: ExtensionContext["modelRegistry"],
 ): ResolvedJarvisModelSelection {
 	if (projectSelection) {
-		return resolveStoredJarvisModelSelection(projectSelection, "project", modelRegistry);
+		const resolvedProjectSelection = resolveStoredJarvisModelSelection(projectSelection, "project", modelRegistry);
+		if (!resolvedProjectSelection.unavailable) {
+			return resolvedProjectSelection;
+		}
+		if (globalSelection) {
+			const resolvedGlobalSelection = resolveStoredJarvisModelSelection(globalSelection, "global", modelRegistry);
+			if (!resolvedGlobalSelection.unavailable) {
+				return {
+					...resolvedGlobalSelection,
+					unavailable: resolvedProjectSelection.unavailable,
+				};
+			}
+		}
+		return resolvedProjectSelection;
 	}
 	if (globalSelection) {
 		return resolveStoredJarvisModelSelection(globalSelection, "global", modelRegistry);
@@ -520,9 +531,23 @@ function resolveJarvisModelSelectionFromSettings(
 function resolveConfiguredJarvisModelSelection(
 	cwd: string,
 	modelRegistry: ExtensionContext["modelRegistry"],
+	onScopeError?: (scope: JarvisModelSelectionScope, error: unknown) => void,
 ): ResolvedJarvisModelSelection {
-	const projectSelection = loadJarvisModelSelectionSetting(cwd, "project");
-	const globalSelection = loadJarvisModelSelectionSetting(cwd, "global");
+	let projectSelection: StoredJarvisModelSelection | undefined;
+	let globalSelection: StoredJarvisModelSelection | undefined;
+
+	try {
+		projectSelection = loadJarvisModelSelectionSetting(cwd, "project");
+	} catch (error) {
+		onScopeError?.("project", error);
+	}
+
+	try {
+		globalSelection = loadJarvisModelSelectionSetting(cwd, "global");
+	} catch (error) {
+		onScopeError?.("global", error);
+	}
+
 	return resolveJarvisModelSelectionFromSettings(projectSelection, globalSelection, modelRegistry);
 }
 

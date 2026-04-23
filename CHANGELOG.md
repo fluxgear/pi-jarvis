@@ -4,6 +4,19 @@ This changelog tracks the tagged release history of this project. Earlier entrie
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+> Historical note: releases before the `pi-jarvis` 1.x line refer to the project's earlier `pi-btw` and `/btw` naming. Those entries are preserved as historical release records and do not describe the current product name or command surface.
+
+## [1.2.1] - 2026-04-22
+
+### Fixed
+- Hardened `/jarvis` state and overlay behavior by recognizing `npm pack --dry-run` as validation, avoiding false `done` summaries after passing validation alone, bounding latest-message refresh to post-compaction entries, preserving concurrent anonymous same-name tool activity, and keeping confirmation/footer content visible on short terminal heights.
+- Improved `/jarvis-model` recovery by letting `clear` remove malformed scoped config files and by falling back between project and global settings independently when one layer is malformed.
+- Tightened overlay transcript sanitization so multiline leaked tool-routing payloads are stripped while legitimate assistant content remains visible.
+
+### Changed
+- Added regression coverage for malformed config recovery, short-height confirmation rendering, package-manifest contract checks, and the new state/runtime edge cases covered by the audit sweep.
+- Marked stale phase/versioned prompts as historical implementation artifacts and clarified the legacy `/btw` naming in the changelog history.
+
 ## [1.2.0] - 2026-04-22
 
 ### Added

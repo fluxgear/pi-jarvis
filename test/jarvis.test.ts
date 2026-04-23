@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AuthStorage, ModelRegistry, SessionManager, type SessionEntry } from "@mariozechner/pi-coding-agent";
@@ -208,6 +208,62 @@ async function testJarvisModelConfigRoundTrip(): Promise<void> {
 		clearJarvisModelSelectionSetting(cwd, "global");
 		assert.equal(loadJarvisModelSelectionSetting(cwd, "global"), undefined);
 		assert.equal(existsSync(getJarvisConfigPath(cwd, "global")), false);
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testMalformedProjectJarvisModelConfigCanBeCleared(): Promise<void> {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-config-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		const path = getJarvisConfigPath(cwd, "project");
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, "{ invalid json\n", "utf8");
+
+		clearJarvisModelSelectionSetting(cwd, "project");
+
+		assert.equal(existsSync(path), false, "clearing a malformed project /jarvis config should remove the broken file");
+		assert.equal(loadJarvisModelSelectionSetting(cwd, "project"), undefined);
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testMalformedGlobalJarvisModelConfigCanBeCleared(): Promise<void> {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-config-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		const path = getJarvisConfigPath(cwd, "global");
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, "{ invalid json\n", "utf8");
+
+		clearJarvisModelSelectionSetting(cwd, "global");
+
+		assert.equal(existsSync(path), false, "clearing a malformed global /jarvis config should remove the broken file");
+		assert.equal(loadJarvisModelSelectionSetting(cwd, "global"), undefined);
 	} finally {
 		if (originalAgentDir === undefined) {
 			delete process.env.PI_CODING_AGENT_DIR;
@@ -530,6 +586,46 @@ async function testSideSessionSanitizesLeakedToolScaffolding(): Promise<void> {
 		assert.ok(!assistantEntry!.text.includes("to=read"), "overlay should not render leaked tool routing text inside assistant output");
 		assert.ok(!assistantEntry!.text.includes('"filePath"'), "overlay should not render leaked tool JSON arguments inside assistant output");
 		assert.ok(assistantEntry!.text.includes("Hello. I've read `README.md`."), "overlay should preserve the final assistant reply after sanitization");
+	});
+}
+
+async function testSideSessionSanitizesMultilineLeakedToolScaffolding(): Promise<void> {
+	await withSideSessionRuntime({}, async (runtime) => {
+		const internal = runtime as unknown as {
+			streamingAssistant?: {
+				role: "assistant";
+				content: Array<{ type: string; text?: string }>;
+			};
+			getDisplayEntries(): ReturnType<JarvisSideSessionRuntime["getDisplayEntries"]>;
+		};
+
+		internal.streamingAssistant = {
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: [
+						"I will inspect the file.",
+						"",
+						"to=read",
+						"{",
+						"  \"filePath\": \"/home/fluxgear/git/pi-jarvis/README.md\",",
+						"  \"options\": {",
+						"    \"offset\": 1",
+						"  }",
+						"}",
+						"",
+						"All set - I inspected README.md.",
+					].join("\n"),
+				},
+			],
+		};
+
+		const assistantEntry = internal.getDisplayEntries().find((entry) => entry.kind === "assistant");
+		assert.ok(assistantEntry, "assistant output should still render after sanitizing multiline leaked tool routing");
+		assert.ok(!assistantEntry!.text.includes("to=read"));
+		assert.ok(!assistantEntry!.text.includes("filePath"));
+		assert.ok(assistantEntry!.text.includes("All set - I inspected README.md."));
 	});
 }
 
@@ -1000,6 +1096,93 @@ async function testBuildMainSessionContext(): Promise<void> {
 	assert.ok(validationContext.summaryText.includes("Validation: npm test is running"));
 }
 
+async function testBuildMainSessionContextRecognizesPackDryRunValidation(): Promise<void> {
+	const activePackContext = buildMainSessionContext({
+		busyState: "busy",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: {
+			active: true,
+			running: [{ toolName: "bash", args: { command: "npm pack --dry-run" } }],
+		},
+		latestUserRequest: "Check the publish shape",
+		latestAssistantText: "Running package validation.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [],
+	});
+
+	assert.equal(activePackContext.summary.workState.attentionMode, "validating");
+	assert.equal(activePackContext.summary.workState.currentAction, "running npm pack --dry-run");
+	assert.equal(activePackContext.summary.validation.status, "running");
+	assert.equal(activePackContext.summary.validation.command, "npm pack --dry-run");
+
+	const completedPackContext = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: "Check the publish shape",
+		latestAssistantText: "Packaging check finished.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [
+			{
+				type: "message",
+				id: "pack-result",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: {
+					role: "bashExecution",
+					command: "npm pack --dry-run",
+					output: "Tarball Contents",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 1,
+				},
+			} as any,
+		],
+	});
+
+	assert.equal(completedPackContext.summary.validation.status, "passed");
+	assert.equal(completedPackContext.summary.validation.command, "npm pack --dry-run");
+	assert.equal(completedPackContext.summary.validation.summary, "npm pack --dry-run passed");
+}
+
+async function testBuildMainSessionContextPassedValidationWaitsForUserWithoutCompletionSignal(): Promise<void> {
+	const context = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: "What next?",
+		latestAssistantText: undefined,
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [
+			{
+				type: "message",
+				id: "passed-bash",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: {
+					role: "bashExecution",
+					command: "npm test",
+					output: "all tests passed",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 1,
+				},
+			} as any,
+		],
+	});
+
+	assert.equal(context.summary.validation.status, "passed");
+	assert.equal(context.summary.workState.attentionMode, "waiting-for-user");
+	assert.equal(context.summary.workState.currentAction, "waiting for user input");
+}
 async function testBuildMainSessionContextIdleStateClassification(): Promise<void> {
 	const blockedContext = buildMainSessionContext({
 		busyState: "idle",
@@ -1248,6 +1431,62 @@ async function testHandleMessageStartMarksAssistantStreaming(): Promise<void> {
 	assert.equal(tracker.snapshot().latestAssistantText, "FINAL_ASSISTANT_TEXT", "message_end should record the final assistant text");
 }
 
+async function testMainSessionTrackerRefreshSkipsPreCompactionMessages(): Promise<void> {
+	const tracker = new MainSessionTracker();
+	tracker.refreshFromContext({
+		getSystemPrompt: () => "main prompt",
+		getContextUsage: () => undefined,
+		isIdle: () => true,
+		hasPendingMessages: () => false,
+		sessionManager: {
+			getBranch: () => [
+				{
+					type: "message",
+					id: "old-user",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00.000Z",
+					message: { role: "user", content: [{ type: "text", text: "stale request" }], timestamp: 0 },
+				} as any,
+				{
+					type: "message",
+					id: "old-assistant",
+					parentId: "old-user",
+					timestamp: "2026-01-01T00:00:01.000Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "stale answer" }],
+						api: "test-api",
+						provider: "test-provider",
+						model: "test-model",
+						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+						stopReason: "stop",
+						timestamp: 1,
+					},
+				} as any,
+				{
+					type: "compaction",
+					id: "compaction-1",
+					parentId: "old-assistant",
+					timestamp: "2026-01-01T00:00:02.000Z",
+					summary: "Older context",
+					firstKeptEntryId: "branch-summary-1",
+					tokensBefore: 256,
+				} as any,
+				{
+					type: "branch_summary",
+					id: "branch-summary-1",
+					parentId: "compaction-1",
+					timestamp: "2026-01-01T00:00:03.000Z",
+					fromId: "old-user",
+					summary: "kept summary only",
+				} as any,
+			],
+		},
+	} as any, "openai/gpt-5.2");
+
+	assert.equal(tracker.snapshot().latestUserRequest, undefined);
+	assert.equal(tracker.snapshot().latestAssistantText, undefined);
+}
 async function testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText(): Promise<void> {
 	const tracker = new MainSessionTracker();
 	tracker.refreshFromContext({
@@ -1317,6 +1556,10 @@ async function testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText(): Promis
 
 async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
 	type PackageManifest = {
+		main?: string;
+		types?: string;
+		files?: string[];
+		exports?: Record<string, unknown>;
 		peerDependencies?: Record<string, string>;
 	};
 
@@ -1325,6 +1568,12 @@ async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
 	assert.equal(peerDependencies["@mariozechner/pi-ai"], "*", "package.json must declare @mariozechner/pi-ai as a peer dependency for published Pi packages");
 	assert.equal(peerDependencies["@mariozechner/pi-coding-agent"], "*", "package.json must declare @mariozechner/pi-coding-agent as a peer dependency for published Pi packages");
 	assert.equal(peerDependencies["@mariozechner/pi-tui"], "*", "package.json must declare @mariozechner/pi-tui as a peer dependency for published Pi packages");
+	assert.equal(packageJson.main, "./dist/index.js", "package.json must point main at the published dist entrypoint");
+	assert.equal(packageJson.types, "./dist/index.d.ts", "package.json must point types at the published dist declaration file");
+	assert.deepEqual(packageJson.files, ["dist", "README.md", "LICENSE"], "package.json should publish the documented package surface");
+	assert.equal((packageJson.exports?.["."] as { default?: string; types?: string } | undefined)?.default, "./dist/index.js");
+	assert.equal((packageJson.exports?.["."] as { default?: string; types?: string } | undefined)?.types, "./dist/index.d.ts");
+	assert.equal(packageJson.exports?.["./package.json"], "./package.json", "package.json should keep exporting its own manifest");
 }
 
 type BridgeToolDefinition = {
@@ -2016,6 +2265,35 @@ async function testJarvisGlobalSettingAppliesWithoutProjectOverride(): Promise<v
 	});
 }
 
+async function testUnavailableProjectJarvisModelFallsBackToValidGlobalSetting(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "global", {
+			mode: "pinned",
+			provider: harness.pinnedModel.provider,
+			modelId: harness.pinnedModel.id,
+		});
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "project", {
+			mode: "pinned",
+			provider: harness.pinnedModel.provider,
+			modelId: "missing-model",
+		});
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(
+			runtime.currentModel?.id,
+			harness.pinnedModel.id,
+			"an unavailable project /jarvis setting should fall back to a valid global setting before defaulting to follow-main",
+		);
+		assert.ok(
+			harness.ctx.notifications.some((notification) =>
+				notification.message.includes("missing-model") && notification.message.includes("project setting"),
+			),
+			"startup should still warn that the project-scoped /jarvis model was unavailable",
+		);
+	});
+}
 async function testJarvisProjectSettingOverridesGlobalSetting(): Promise<void> {
 	await withJarvisExtensionHarness(async (harness) => {
 		saveJarvisModelSelectionSetting(harness.ctx.cwd, "global", {
@@ -2088,6 +2366,51 @@ async function testJarvisClearGlobalSettingFallsBackToDefault(): Promise<void> {
 		);
 	});
 }
+
+async function testMalformedProjectJarvisModelSettingFallsBackToValidGlobalOnStartup(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "global", {
+			mode: "pinned",
+			provider: harness.pinnedModel.provider,
+			modelId: harness.pinnedModel.id,
+		});
+		const projectPath = getJarvisConfigPath(harness.ctx.cwd, "project");
+		mkdirSync(dirname(projectPath), { recursive: true });
+		writeFileSync(projectPath, "{ invalid json\n", "utf8");
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.currentModel?.id, harness.pinnedModel.id);
+		assert.ok(
+			harness.ctx.notifications.some((notification) => notification.message.includes("project /jarvis model setting")),
+			"startup should warn when the project /jarvis model config is malformed",
+		);
+	});
+}
+
+async function testMalformedGlobalJarvisModelSettingFallsBackToValidProjectOnStartup(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "project", {
+			mode: "pinned",
+			provider: harness.nextMainModel.provider,
+			modelId: harness.nextMainModel.id,
+		});
+		const globalPath = getJarvisConfigPath(harness.ctx.cwd, "global");
+		mkdirSync(dirname(globalPath), { recursive: true });
+		writeFileSync(globalPath, "{ invalid json\n", "utf8");
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.currentModel?.id, harness.nextMainModel.id);
+		assert.ok(
+			harness.ctx.notifications.some((notification) => notification.message.includes("global /jarvis model setting")),
+			"startup should warn when the global /jarvis model config is malformed",
+		);
+	});
+}
+
 async function testSideSessionToolWhitelist(): Promise<void> {
 	await withSideSessionRuntime({}, async (_runtime, probe) => {
 		assert.ok(probe.session, "side session runtime should expose the underlying session");
@@ -2418,6 +2741,32 @@ async function testOverlayConfirmationRenderingAndKeys(): Promise<void> {
 	assert.equal(closed, true, "Esc must close the overlay once no confirmation is pending");
 }
 
+async function testOverlayShortHeightKeepsConfirmationVisible(): Promise<void> {
+	const terminal = new FakeTerminal();
+	terminal.resize(80, 12);
+	const tui = new TUI(terminal);
+	const bridge = new JarvisOverlayBridge();
+	bridge.notify("First notice");
+	bridge.notify("Second notice");
+	const { view } = createTestOverlayView({
+		displayEntries: [
+			{ kind: "assistant", text: "Older transcript line one" },
+			{ kind: "assistant", text: "Older transcript line two" },
+		],
+	});
+	const overlay = new JarvisOverlayComponent(tui, theme, bridge, view, () => {});
+	void bridge.requestConfirmation(
+		"Send /jarvis steer to main?",
+		"This will steer the main agent with:\n\nfocus on edge cases",
+	);
+
+	const lines = overlay.render(80);
+	assert.ok(lines.some((line) => line.includes("Send /jarvis steer to main?")));
+	assert.ok(lines.some((line) => line.includes("focus on edge cases")));
+	assert.ok(lines.some((line) => line.includes("Press Y to confirm, N or Esc to cancel.")));
+	assert.ok(lines.some((line) => line.includes("Y confirm")));
+}
+
 async function testSteerConfirmationRoutedThroughBridge(): Promise<void> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-test-"));
@@ -2550,9 +2899,28 @@ async function testMainSessionTrackerToolExecutionKeying(): Promise<void> {
 	);
 }
 
+async function testMainSessionTrackerAnonymousSameNameToolExecutionsDoNotCollapse(): Promise<void> {
+	const tracker = new MainSessionTracker();
+
+	tracker.handleToolExecutionStart({ toolName: "read", args: { path: "a.ts" } });
+	tracker.handleToolExecutionStart({ toolName: "read", args: { path: "b.ts" } });
+	assert.equal(
+		tracker.snapshot().toolExecution.running.length,
+		2,
+		"concurrent anonymous same-name tool executions should each remain visible in the tracker",
+	);
+
+	tracker.handleToolExecutionEnd({ toolName: "read" });
+	assert.equal(tracker.snapshot().toolExecution.running.length, 1);
+
+	tracker.handleToolExecutionEnd({ toolName: "read" });
+	assert.equal(tracker.snapshot().toolExecution.running.length, 0);
+}
 async function main(): Promise<void> {
 	await testSessionRef();
 	await testJarvisModelConfigRoundTrip();
+	await testMalformedProjectJarvisModelConfigCanBeCleared();
+	await testMalformedGlobalJarvisModelConfigCanBeCleared();
 	await testOverlayFocusAndEscRouting();
 	await testOverlayRenderDistinctness();
 	await testOverlayAnimatedThinkingFallback();
@@ -2561,9 +2929,12 @@ async function main(): Promise<void> {
 	await testJarvisOverlayInputHistoryNavigatesUserMessages();
 	await testBridgeConfirmationPrimitive();
 	await testOverlayConfirmationRenderingAndKeys();
+	await testOverlayShortHeightKeepsConfirmationVisible();
 	await testHandleMessageStartMarksAssistantStreaming();
+	await testMainSessionTrackerRefreshSkipsPreCompactionMessages();
 	await testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText();
 	await testMainSessionTrackerToolExecutionKeying();
+	await testMainSessionTrackerAnonymousSameNameToolExecutionsDoNotCollapse();
 	await testJarvisModelDefaultFollowMainBehavior();
 	await testXaiFollowMainForcesThinkingOff();
 	await testJarvisModelOpensModelMenuWhenNoArgs();
@@ -2577,17 +2948,23 @@ async function main(): Promise<void> {
 	await testJarvisModelReturnToFollowMainBehavior();
 	await testJarvisModelDefaultScopeWritesProjectConfig();
 	await testJarvisGlobalSettingAppliesWithoutProjectOverride();
+	await testUnavailableProjectJarvisModelFallsBackToValidGlobalSetting();
 	await testJarvisProjectSettingOverridesGlobalSetting();
 	await testJarvisClearProjectSettingFallsBackToGlobal();
 	await testJarvisClearGlobalSettingFallsBackToDefault();
+	await testMalformedProjectJarvisModelSettingFallsBackToValidGlobalOnStartup();
+	await testMalformedGlobalJarvisModelSettingFallsBackToValidProjectOnStartup();
 	await testSideSessionPersistence();
 	await testSideSessionFreshWelcomeMessage();
 	await testSideSessionKeepsPendingUserPromptAndShowsThinking();
 	await testSideSessionSanitizesLeakedToolScaffolding();
+	await testSideSessionSanitizesMultilineLeakedToolScaffolding();
 	await testSideSessionPreservesLegitimateJsonContent();
 	await testSideSessionUsesMainSystemPrompt();
 	await testBuildMainSessionContext();
+	await testBuildMainSessionContextRecognizesPackDryRunValidation();
 	await testBuildMainSessionContextIdleStateClassification();
+	await testBuildMainSessionContextPassedValidationWaitsForUserWithoutCompletionSignal();
 	await testSideSessionToolWhitelist();
 	await testSideSessionLocalToolsActivateWhenPermitted();
 	await testSideSessionLocalToolsReportMcpUnavailableWhenAdapterMissing();

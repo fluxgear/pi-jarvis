@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getLatestCompactionEntry, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 type BranchEntries = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>;
 type ContextUsageSnapshot = ReturnType<ExtensionContext["getContextUsage"]>;
@@ -60,6 +60,7 @@ export class MainSessionTracker {
 	private contextUsage?: ContextUsageSnapshot;
 	private branchEntries: BranchEntries = [];
 	private assistantStreaming = false;
+	private anonymousToolCallCounter = 0;
 	private readonly activeToolCalls = new Map<string, ActiveToolCall>();
 
 	reset(modelLabel: string = "model unavailable"): void {
@@ -72,6 +73,7 @@ export class MainSessionTracker {
 		this.contextUsage = undefined;
 		this.branchEntries = [];
 		this.assistantStreaming = false;
+		this.anonymousToolCallCounter = 0;
 		this.activeToolCalls.clear();
 	}
 
@@ -118,7 +120,7 @@ export class MainSessionTracker {
 		}
 
 		const toolCallId = typeof event.toolCallId === "string" && event.toolCallId.length > 0 ? event.toolCallId : undefined;
-		const key = toolCallId ?? `tool:${toolName}`;
+		const key = toolCallId ?? `tool:${toolName}:${this.anonymousToolCallCounter++}`;
 		this.activeToolCalls.set(key, {
 			key,
 			toolCallId,
@@ -134,13 +136,6 @@ export class MainSessionTracker {
 			return;
 		}
 		if (!toolName) {
-			return;
-		}
-		// Fallback: handleToolExecutionStart may have keyed the entry by a
-		// synthetic `tool:${toolName}` when the start event carried no
-		// toolCallId. Drop any matching entry so the currentToolActivity summary
-		// does not leak a stale "currently running" tool.
-		if (this.activeToolCalls.delete(`tool:${toolName}`)) {
 			return;
 		}
 		for (const [key, value] of this.activeToolCalls.entries()) {
@@ -199,8 +194,21 @@ export class MainSessionTracker {
 		let sawLatestUserMessage = false;
 		let sawLatestAssistantMessage = false;
 
-		for (let i = this.branchEntries.length - 1; i >= 0; i--) {
-			const message = unwrapMessage(this.branchEntries[i]);
+		const latestCompaction = getLatestCompactionEntry([...this.branchEntries]);
+		const boundedEntries = (() => {
+			if (!latestCompaction) {
+				return this.branchEntries;
+			}
+			const firstKeptIndex = this.branchEntries.findIndex((entry: any) => entry.id === latestCompaction.firstKeptEntryId);
+			if (firstKeptIndex >= 0) {
+				return this.branchEntries.slice(firstKeptIndex);
+			}
+			const compactionIndex = this.branchEntries.findIndex((entry: any) => entry.id === latestCompaction.id);
+			return compactionIndex >= 0 ? this.branchEntries.slice(compactionIndex + 1) : this.branchEntries;
+		})();
+
+		for (let i = boundedEntries.length - 1; i >= 0; i--) {
+			const message = unwrapMessage(boundedEntries[i]);
 			if (!message) {
 				continue;
 			}

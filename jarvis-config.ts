@@ -64,7 +64,14 @@ export function clearJarvisModelSelectionSetting(
 		return;
 	}
 
-	const config = readJarvisConfigFile(path);
+	let config: JarvisConfigFile;
+	try {
+		config = readJarvisConfigFile(path);
+	} catch {
+		rmSync(path, { force: true });
+		return;
+	}
+
 	delete config.modelSelection;
 	if (Object.keys(config).length === 0) {
 		rmSync(path, { force: true });

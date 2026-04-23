@@ -266,36 +266,38 @@ export class JarvisOverlayComponent implements Component, Focusable {
 			innerWidth,
 		);
 
-		// Pre-compute every fixed section first so the transcript budget reflects
-		// the true remaining space. Under-reserving here would push the footer
-		// (or the confirmation banner) off the bottom of the overlay.
-		const promptSectionLines = confirmationLines ? confirmationLines.length + 1 : 2;
-		const footerSectionLines = 1;
+		const promptSectionLines = [
+			promptDivider,
+			...(confirmationLines ?? (inputLine ? [inputLine] : [])),
+			footer,
+		];
 		const borderLines = 2;
-		const transcriptSectionLines = 1;
-		const reservedLines =
-			headerLines.length + notificationLines.length + transcriptSectionLines + promptSectionLines + footerSectionLines + borderLines;
-		const transcriptBudget = Math.max(4, maxHeight - reservedLines);
-		const transcriptLines = this.renderTranscript(innerWidth, transcriptBudget, snapshot);
+		const maxBodyLines = Math.max(1, maxHeight - borderLines);
+		const reservedBottomLines = promptSectionLines.length;
+		let remainingLines = Math.max(0, maxBodyLines - reservedBottomLines);
 
-		const body: string[] = [];
-		body.push(...headerLines);
-		if (notificationLines.length > 0) {
-			body.push(...notificationLines);
+		const topSections: string[] = [];
+		const visibleHeaderLines = headerLines.slice(0, remainingLines);
+		topSections.push(...visibleHeaderLines);
+		remainingLines -= visibleHeaderLines.length;
+
+		if (remainingLines > 0 && notificationLines.length > 0) {
+			const visibleNotificationLines = notificationLines.slice(-remainingLines);
+			topSections.push(...visibleNotificationLines);
+			remainingLines -= visibleNotificationLines.length;
 		}
-		body.push(transcriptDivider);
-		body.push(...transcriptLines);
-		body.push(promptDivider);
-		if (confirmationLines) {
-			body.push(...confirmationLines);
-		} else if (inputLine) {
-			body.push(inputLine);
+
+		if (remainingLines > 0) {
+			topSections.push(transcriptDivider);
+			remainingLines -= 1;
+			topSections.push(...this.renderTranscript(innerWidth, remainingLines, snapshot));
 		}
-		body.push(footer);
+
+		const body = [...topSections, ...promptSectionLines].slice(0, maxBodyLines);
 
 		const lines: string[] = [];
 		lines.push(this.borderTop(innerWidth));
-		for (const line of body.slice(0, Math.max(1, maxHeight - borderLines))) {
+		for (const line of body) {
 			lines.push(this.row(line, innerWidth));
 		}
 		lines.push(this.borderBottom(innerWidth));
@@ -354,6 +356,11 @@ export class JarvisOverlayComponent implements Component, Focusable {
 	}
 
 	private renderTranscript(innerWidth: number, budget: number, snapshot: JarvisOverlaySnapshot): string[] {
+		if (budget <= 0) {
+			this.syncThinkingAnimation(Boolean(snapshot.workingMessage && this.view.isStreaming()));
+			return [];
+		}
+
 		const lines: string[] = [];
 		const displayEntries = this.view.getDisplayEntries();
 		const showAnimatedThinkingFallback = Boolean(snapshot.workingMessage && this.view.isStreaming());
@@ -374,11 +381,7 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		for (const status of snapshot.statuses) {
 			lines.push(...this.wrapBlock(status, innerWidth));
 		}
-		const collapsed = lines.slice(-budget);
-		while (collapsed.length < budget) {
-			collapsed.unshift("");
-		}
-		return collapsed;
+		return lines.slice(-budget);
 	}
 
 	private renderEntry(entry: JarvisDisplayEntry, innerWidth: number): string[] {
