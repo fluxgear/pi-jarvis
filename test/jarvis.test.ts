@@ -20,6 +20,7 @@ type Terminal = {
 	clearFromCursor(): void;
 	clearScreen(): void;
 	setTitle(title: string): void;
+	setProgress(active: boolean): void;
 };
 import { JarvisOverlayBridge, JarvisOverlayComponent, attachOverlayBridge, cursorMarkerPresent, type JarvisOverlayView } from "../overlay.js";
 import { buildMainSessionContext, DEFAULT_MAIN_SESSION_RECENT_LIMIT } from "../main-context.js";
@@ -59,6 +60,7 @@ class FakeTerminal implements Terminal {
 	clearFromCursor(): void {}
 	clearScreen(): void {}
 	setTitle(): void {}
+	setProgress(): void {}
 
 	emit(data: string): void {
 		this.inputHandler?.(data);
@@ -1738,7 +1740,9 @@ class FakeExtensionAPI {
 class FakeJarvisRuntime {
 	syncModelCalls: Array<{ model: TestModel | undefined; thinkingLevel: string | undefined }> = [];
 	toolAccessCalls: boolean[] = [];
+	sendMessageCalls: string[] = [];
 	toolAccessEnabled = false;
+	nextSendError: Error | undefined;
 
 	constructor(
 		public currentModel: TestModel | undefined,
@@ -1770,7 +1774,14 @@ class FakeJarvisRuntime {
 		this.toolAccessEnabled = enabled;
 	}
 
-	async sendMessage(): Promise<void> {}
+	async sendMessage(message?: string): Promise<void> {
+		this.sendMessageCalls.push(message ?? "");
+		if (this.nextSendError) {
+			const error = this.nextSendError;
+			this.nextSendError = undefined;
+			throw error;
+		}
+	}
 
 	async syncModel(model: TestModel | undefined, thinkingLevel: string | undefined): Promise<void> {
 		this.syncModelCalls.push({ model, thinkingLevel });
@@ -2089,6 +2100,27 @@ async function testQueuedJarvisSendUsesDesiredThinkingLevel(): Promise<void> {
 	});
 }
 
+async function testQueuedJarvisSendRetriesAfterTransientFailure(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const runtime = await openJarvisRuntime(harness);
+		runtime.nextSendError = new Error("boom");
+
+		await harness.api.runCommand("jarvis", "first queued message", harness.ctx);
+		await waitForAsyncWork();
+
+		assert.deepEqual(runtime.sendMessageCalls, ["first queued message"]);
+
+		await harness.api.runCommand("jarvis", "second queued message", harness.ctx);
+		await waitForAsyncWork();
+
+		assert.deepEqual(
+			runtime.sendMessageCalls,
+			["first queued message", "first queued message", "second queued message"],
+			"/jarvis should keep the failed queued message for retry before sending later queued messages",
+		);
+	});
+}
+
 async function testJarvisOverlayToolToggleSyncsRuntime(): Promise<void> {
 	await withJarvisExtensionHarness(async (harness) => {
 		let capturedComponent: any;
@@ -2165,7 +2197,7 @@ async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): P
 			return originalCustom.call(harness.ctx.ui, fn, opts);
 		};
 
-		await harness.api.runCommand("jarvis", "", harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
 		await waitForAsyncWork();
 
 		assert.ok(capturedComponent, "should capture overlay component");
@@ -2174,7 +2206,7 @@ async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): P
 		// The default focus is "input".
 		capturedComponent.handleInput("\t"); // focus Tools
 		capturedComponent.handleInput("\t"); // focus Share
-		capturedComponent.handleInput(" "); // toggle it ON
+		capturedComponent.handleInput(" " );
 
 		// Now switch model to incompatible
 		harness.ctx.model = harness.ctx.modelRegistry.find("xai", "grok-incompatible-multi-agent");
@@ -2188,6 +2220,11 @@ async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): P
 		assert.ok(
 			lines.some((line) => line.includes("Disabled Follow-up/Steer:")),
 			"/jarvis should use polished Follow-up casing in compatibility warnings",
+		);
+		assert.deepEqual(
+			runtime.toolAccessCalls,
+			[false, false],
+			"/jarvis should refresh the live runtime tool set after compatibility changes revoke bridge permissions",
 		);
 	});
 }
@@ -2286,11 +2323,18 @@ async function testUnavailableProjectJarvisModelFallsBackToValidGlobalSetting():
 			harness.pinnedModel.id,
 			"an unavailable project /jarvis setting should fall back to a valid global setting before defaulting to follow-main",
 		);
+		const fallbackWarning = harness.ctx.notifications.find(
+			(notification) => notification.message.includes("missing-model") && notification.message.includes("project setting"),
+		);
+		assert.ok(fallbackWarning, "startup should still warn that the project-scoped /jarvis model was unavailable");
 		assert.ok(
-			harness.ctx.notifications.some((notification) =>
-				notification.message.includes("missing-model") && notification.message.includes("project setting"),
-			),
-			"startup should still warn that the project-scoped /jarvis model was unavailable",
+			fallbackWarning!.message.includes(`${harness.pinnedModel.provider}/${harness.pinnedModel.id}`) &&
+				fallbackWarning!.message.includes("global setting"),
+			"startup should describe the actual fallback selection when a valid global /jarvis model is used",
+		);
+		assert.ok(
+			!fallbackWarning!.message.includes("follow-main"),
+			"startup should not falsely claim follow-main when /jarvis actually fell back to the global pinned model",
 		);
 	});
 }
@@ -2962,6 +3006,7 @@ async function main(): Promise<void> {
 	await testPinnedJarvisModelNotClobberedByMainModelSelect();
 	await testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime();
 	await testQueuedJarvisSendUsesDesiredThinkingLevel();
+	await testQueuedJarvisSendRetriesAfterTransientFailure();
 	await testJarvisOverlayToolToggleSyncsRuntime();
 	await testJarvisOverlaySkipsReconnectTextForMissingSessionRef();
 	await testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning();

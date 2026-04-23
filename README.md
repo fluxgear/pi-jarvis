@@ -100,7 +100,7 @@ Allows `/jarvis` to send a redirecting instruction to the main session, but ever
 ## Session model
 - `/jarvis` keeps its own isolated conversation state
 - prior side-session history is restored from a session file under `jarvis-sessions/`
-- `/jarvis` resolves its model from project config (`.pi/jarvis.json`), then global config (`~/.pi/agent/extensions/pi-jarvis.json`), then the built-in `follow-main` default
+- `/jarvis` resolves its model from project config (`.pi/jarvis.json`), then the default global config path (`~/.pi/agent/extensions/pi-jarvis.json`, or the equivalent path under a custom Pi agent dir), then the built-in `follow-main` default
 - plain `/jarvis-model <provider/model>` writes the project override; use `--global` to change the global default
 - thinking-step streaming is collapsed to a cleaner animated fallback for readability
 

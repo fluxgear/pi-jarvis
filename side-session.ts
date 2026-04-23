@@ -242,7 +242,6 @@ export class JarvisSideSessionRuntime {
 			modelRegistry: options.modelRegistry as any,
 			model: options.model,
 			thinkingLevel: options.thinkingLevel as any,
-			tools: createCodingTools(options.cwd),
 			resourceLoader,
 			sessionManager: sideSessionManager,
 		});
@@ -606,6 +605,7 @@ function createSideUiContext(
 		onTerminalInput: () => () => {},
 		setStatus: (key: string, text: string | undefined) => bridge.setStatus(key, text),
 		setWorkingMessage: (message?: string) => bridge.setWorkingMessage(message),
+		setWorkingIndicator: () => {},
 		setHiddenThinkingLabel: () => {},
 		setWidget: () => {},
 		setFooter: () => {},
@@ -622,6 +622,7 @@ function createSideUiContext(
 		},
 		getEditorText: () => editorText,
 		editor: async () => undefined,
+		addAutocompleteProvider: () => {},
 		setEditorComponent: () => {},
 		get theme() {
 			return themeProvider();

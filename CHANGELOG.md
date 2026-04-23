@@ -1,12 +1,12 @@
 # Changelog
 
-This changelog tracks the tagged release history of this project. Earlier entries were reconstructed from the repository's release tags where fuller notes were not preserved at release time.
+This changelog tracks the documented release history of this project. Earlier entries were reconstructed from the repository's release tags where fuller notes were not preserved at release time.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
 > Historical note: releases before the `pi-jarvis` 1.x line refer to the project's earlier `pi-btw` and `/btw` naming. Those entries are preserved as historical release records and do not describe the current product name or command surface.
 
-## [1.2.2] - 2026-04-23
+## [1.2.2] - 2026-04-22
 
 ### Fixed
 - Made `/jarvis` report MCP availability from the actual loaded tool set instead of extension-path discovery alone, so non-MCP extension paths no longer surface a false `MCP available` state.

@@ -42,7 +42,7 @@
     ]
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "prepack": "npm run build",
     "test": "npm run check && node --import tsx test/jarvis.test.ts"
@@ -56,9 +56,9 @@
     "@mariozechner/pi-tui": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-ai": "latest",
-    "@mariozechner/pi-coding-agent": "latest",
-    "@mariozechner/pi-tui": "latest",
+    "@mariozechner/pi-ai": "0.69.0",
+    "@mariozechner/pi-coding-agent": "0.69.0",
+    "@mariozechner/pi-tui": "0.69.0",
     "@sinclair/typebox": "^0.34.41",
     "@types/node": "^24.5.2",
     "tsx": "^4.20.5",

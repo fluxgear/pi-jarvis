@@ -311,7 +311,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		enforceCompatibilityGuard(state);
 		if (resolvedSelection.unavailable) {
 			ctx.ui.notify(
-				`Configured /jarvis model ${resolvedSelection.unavailable.modelReference} from the ${resolvedSelection.unavailable.scope} setting is unavailable. Falling back to follow-main.`,
+				`Configured /jarvis model ${resolvedSelection.unavailable.modelReference} from the ${resolvedSelection.unavailable.scope} setting is unavailable. /jarvis is now ${describeJarvisModelSelection(state)}.`,
 				"warning",
 			);
 		}
@@ -569,6 +569,7 @@ function enforceCompatibilityGuard(state: MainState): void {
 		state.allowSteerToMain = false;
 		state.bridge.notify(`Disabled Follow-up/Steer: ${formatModelLabel(desired)} does not support bridge tools.`, "warning");
 	}
+	state.runtime?.setToolAccessEnabled(state.allowSideTools);
 }
 
 function getJarvisModelModeLabel(selection: JarvisModelSelection): string {
@@ -793,9 +794,10 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 			await runtime.syncModel(getDesiredJarvisModel(state), getDesiredJarvisThinkingLevel(state));
 
 			while (state.queuedMessages.length > 0) {
-				const message = state.queuedMessages.shift()!;
+				const message = state.queuedMessages[0]!;
 				try {
 					await runtime.sendMessage(message);
+					state.queuedMessages.shift();
 					state.lastJarvisSeenMainContext = state.mainContext;
 				} catch (error) {
 					state.bridge.notify(`Failed to send /jarvis message: ${error instanceof Error ? error.message : String(error)}`, "error");
