@@ -207,7 +207,7 @@ export class JarvisSideSessionRuntime {
 		this.toolAccessEnabled = options.toolAccessProvider();
 		const hasConversationHistory = () => this.hasConversationHistory || (options.hasConversationHistory?.() ?? false);
 		const mcpExtensionPath = options.mcpExtensionPathProvider ? options.mcpExtensionPathProvider() : resolveOptionalMcpExtensionPath();
-		this.mcpAvailable = Boolean(mcpExtensionPath);
+		this.mcpAvailable = false;
 
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: options.cwd,
@@ -254,6 +254,7 @@ export class JarvisSideSessionRuntime {
 				this.bridge.notify(`Side extension error: ${error.error}`, "error");
 			},
 		});
+		this.mcpAvailable = session.getAllTools().some((tool) => tool.name === "mcp");
 		this.syncActiveTools?.();
 
 		if (options.model && hadExistingEntries) {

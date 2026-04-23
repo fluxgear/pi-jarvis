@@ -135,9 +135,9 @@ The npm package publishes:
 
 - `dist/`
 - `README.md`
+- `AGENTS.md`
 - `LICENSE`
 - `package.json`
-
 ## License
 
 MIT

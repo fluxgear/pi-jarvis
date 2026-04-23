@@ -1570,7 +1570,7 @@ async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
 	assert.equal(peerDependencies["@mariozechner/pi-tui"], "*", "package.json must declare @mariozechner/pi-tui as a peer dependency for published Pi packages");
 	assert.equal(packageJson.main, "./dist/index.js", "package.json must point main at the published dist entrypoint");
 	assert.equal(packageJson.types, "./dist/index.d.ts", "package.json must point types at the published dist declaration file");
-	assert.deepEqual(packageJson.files, ["dist", "README.md", "LICENSE"], "package.json should publish the documented package surface");
+	assert.deepEqual(packageJson.files, ["dist", "README.md", "AGENTS.md", "LICENSE"], "package.json should publish the documented package surface");
 	assert.equal((packageJson.exports?.["."] as { default?: string; types?: string } | undefined)?.default, "./dist/index.js");
 	assert.equal((packageJson.exports?.["."] as { default?: string; types?: string } | undefined)?.types, "./dist/index.d.ts");
 	assert.equal(packageJson.exports?.["./package.json"], "./package.json", "package.json should keep exporting its own manifest");
@@ -2453,6 +2453,26 @@ async function testSideSessionLocalToolsReportMcpUnavailableWhenAdapterMissing()
 	});
 }
 
+async function testSideSessionLocalToolsDoNotClaimMcpForArbitraryExtensionPath(): Promise<void> {
+	const fakeExtensionRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-fake-extension-"));
+	const fakeExtensionPath = join(fakeExtensionRoot, "index.mjs");
+	writeFileSync(fakeExtensionPath, "export default function fakeExtension() {}\n", "utf8");
+
+	try {
+		await withSideSessionRuntime({ toolAccessEnabled: true, mcpExtensionPath: fakeExtensionPath }, async (runtime, probe) => {
+			assert.ok(probe.session, "side session runtime should expose the underlying session");
+			const activeToolNames: string[] = probe.session!.getActiveToolNames().slice().sort();
+			for (const toolName of ["read", "bash", "edit", "write"]) {
+				assert.ok(activeToolNames.includes(toolName), `/jarvis should still expose ${toolName} when local tool access is enabled with a non-MCP extension path`);
+			}
+			assert.ok(!activeToolNames.includes("mcp"), "/jarvis should not expose MCP for an arbitrary non-MCP extension path");
+			assert.equal(runtime.getRepoToolsDetailLabel(), "local tools only (MCP unavailable)", "the repo-tools label must only claim MCP availability when an MCP tool is actually loaded");
+		});
+	} finally {
+		rmSync(fakeExtensionRoot, { recursive: true, force: true });
+	}
+}
+
 async function testSideSessionBridgeToolsActivateWhenPermitted(): Promise<void> {
 	await withSideSessionRuntime(
 		{ communicationPermissions: { allowFollowUpToMain: true, allowSteerToMain: true } },
@@ -2968,6 +2988,7 @@ async function main(): Promise<void> {
 	await testSideSessionToolWhitelist();
 	await testSideSessionLocalToolsActivateWhenPermitted();
 	await testSideSessionLocalToolsReportMcpUnavailableWhenAdapterMissing();
+	await testSideSessionLocalToolsDoNotClaimMcpForArbitraryExtensionPath();
 	await testSideSessionBridgeToolsActivateWhenPermitted();
 	await testFollowUpToolPermissionGating();
 	await testSteerToolPermissionAndConfirmGating();

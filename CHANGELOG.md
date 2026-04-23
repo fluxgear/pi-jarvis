@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > Historical note: releases before the `pi-jarvis` 1.x line refer to the project's earlier `pi-btw` and `/btw` naming. Those entries are preserved as historical release records and do not describe the current product name or command surface.
 
+## [1.2.2] - 2026-04-23
+
+### Fixed
+- Made `/jarvis` report MCP availability from the actual loaded tool set instead of extension-path discovery alone, so non-MCP extension paths no longer surface a false `MCP available` state.
+
+### Changed
+- Added regression coverage for the non-MCP extension-path case, shipped `AGENTS.md` in the published package surface, and aligned the README package-contents section with the actual npm tarball.
+- Marked the stale phase-02 and next-session prompt files as historical implementation artifacts instead of live product guidance.
+
 ## [1.2.1] - 2026-04-22
 
 ### Fixed
