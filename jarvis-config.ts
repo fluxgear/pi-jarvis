@@ -4,12 +4,20 @@ import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
 export type JarvisModelSelectionScope = "global" | "project";
 
+export type JarvisThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export type StoredJarvisModelSelection =
 	| { mode: "follow-main" }
 	| { mode: "pinned"; provider: string; modelId: string };
 
+export type StoredJarvisThinkingSelection =
+	| { mode: "auto" }
+	| { mode: "follow-main" }
+	| { mode: "pinned"; thinkingLevel: JarvisThinkingLevel };
+
 type JarvisConfigFile = Record<string, unknown> & {
 	modelSelection?: StoredJarvisModelSelection;
+	thinkingSelection?: StoredJarvisThinkingSelection;
 };
 
 export function getJarvisConfigPath(
@@ -59,6 +67,57 @@ export function clearJarvisModelSelectionSetting(
 	scope: JarvisModelSelectionScope,
 	agentDir: string = getAgentDir(),
 ): void {
+	clearJarvisConfigSetting(cwd, scope, "modelSelection", agentDir);
+}
+
+export function loadJarvisThinkingSelectionSetting(
+	cwd: string,
+	scope: JarvisModelSelectionScope,
+	agentDir: string = getAgentDir(),
+): StoredJarvisThinkingSelection | undefined {
+	const path = getJarvisConfigPath(cwd, scope, agentDir);
+	if (!existsSync(path)) {
+		return undefined;
+	}
+
+	const config = readJarvisConfigFile(path);
+	if (config.thinkingSelection === undefined) {
+		return undefined;
+	}
+
+	const selection = parseStoredJarvisThinkingSelection(config.thinkingSelection);
+	if (!selection) {
+		throw new Error(`Invalid thinkingSelection in ${path}.`);
+	}
+	return selection;
+}
+
+export function saveJarvisThinkingSelectionSetting(
+	cwd: string,
+	scope: JarvisModelSelectionScope,
+	selection: StoredJarvisThinkingSelection,
+	agentDir: string = getAgentDir(),
+): void {
+	const path = getJarvisConfigPath(cwd, scope, agentDir);
+	const config = existsSync(path) ? readJarvisConfigFile(path) : {};
+	config.thinkingSelection = selection;
+	writeJarvisConfigFile(path, config);
+}
+
+export function clearJarvisThinkingSelectionSetting(
+	cwd: string,
+	scope: JarvisModelSelectionScope,
+	agentDir: string = getAgentDir(),
+): void {
+	clearJarvisConfigSetting(cwd, scope, "thinkingSelection", agentDir);
+}
+
+function clearJarvisConfigSetting(
+	cwd: string,
+	scope: JarvisModelSelectionScope,
+	setting: "modelSelection" | "thinkingSelection",
+	agentDir: string,
+): void {
 	const path = getJarvisConfigPath(cwd, scope, agentDir);
 	if (!existsSync(path)) {
 		return;
@@ -72,7 +131,7 @@ export function clearJarvisModelSelectionSetting(
 		return;
 	}
 
-	delete config.modelSelection;
+	delete config[setting];
 	if (Object.keys(config).length === 0) {
 		rmSync(path, { force: true });
 		return;
@@ -124,4 +183,26 @@ function parseStoredJarvisModelSelection(data: unknown): StoredJarvisModelSelect
 		};
 	}
 	return undefined;
+}
+
+function parseStoredJarvisThinkingSelection(data: unknown): StoredJarvisThinkingSelection | undefined {
+	if (!data || typeof data !== "object") {
+		return undefined;
+	}
+
+	const candidate = data as { mode?: unknown; thinkingLevel?: unknown };
+	if (candidate.mode === "auto") {
+		return { mode: "auto" };
+	}
+	if (candidate.mode === "follow-main") {
+		return { mode: "follow-main" };
+	}
+	if (candidate.mode === "pinned" && isJarvisThinkingLevel(candidate.thinkingLevel)) {
+		return { mode: "pinned", thinkingLevel: candidate.thinkingLevel };
+	}
+	return undefined;
+}
+
+function isJarvisThinkingLevel(value: unknown): value is JarvisThinkingLevel {
+	return value === "off" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
 }

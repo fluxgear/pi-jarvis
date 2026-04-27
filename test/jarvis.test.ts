@@ -26,7 +26,15 @@ import { JarvisOverlayBridge, JarvisOverlayComponent, attachOverlayBridge, curso
 import { buildMainSessionContext, DEFAULT_MAIN_SESSION_RECENT_LIMIT } from "../main-context.js";
 import { MainSessionTracker } from "../main-session-state.js";
 import { createJarvisSessionRef, readJarvisSessionRef, JARVIS_SESSION_REF_CUSTOM_TYPE } from "../session-ref.js";
-import { clearJarvisModelSelectionSetting, getJarvisConfigPath, loadJarvisModelSelectionSetting, saveJarvisModelSelectionSetting } from "../jarvis-config.js";
+import {
+	clearJarvisModelSelectionSetting,
+	clearJarvisThinkingSelectionSetting,
+	getJarvisConfigPath,
+	loadJarvisModelSelectionSetting,
+	loadJarvisThinkingSelectionSetting,
+	saveJarvisModelSelectionSetting,
+	saveJarvisThinkingSelectionSetting,
+} from "../jarvis-config.js";
 import { JarvisSideSessionRuntime, createSideSessionFile } from "../side-session.js";
 import jarvisExtension from "../index.js";
 
@@ -222,6 +230,47 @@ async function testJarvisModelConfigRoundTrip(): Promise<void> {
 
 		clearJarvisModelSelectionSetting(cwd, "global");
 		assert.equal(loadJarvisModelSelectionSetting(cwd, "global"), undefined);
+		assert.equal(existsSync(getJarvisConfigPath(cwd, "global")), false);
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testJarvisThinkingConfigRoundTrip(): Promise<void> {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-thinking-config-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		saveJarvisThinkingSelectionSetting(cwd, "global", { mode: "pinned", thinkingLevel: "medium" });
+		assert.deepEqual(loadJarvisThinkingSelectionSetting(cwd, "global"), { mode: "pinned", thinkingLevel: "medium" });
+
+		saveJarvisThinkingSelectionSetting(cwd, "project", { mode: "follow-main" });
+		assert.deepEqual(loadJarvisThinkingSelectionSetting(cwd, "project"), { mode: "follow-main" });
+
+		saveJarvisModelSelectionSetting(cwd, "project", { mode: "follow-main" });
+		clearJarvisThinkingSelectionSetting(cwd, "project");
+		assert.equal(loadJarvisThinkingSelectionSetting(cwd, "project"), undefined);
+		assert.deepEqual(
+			loadJarvisModelSelectionSetting(cwd, "project"),
+			{ mode: "follow-main" },
+			"clearing a thinking setting should preserve other /jarvis config keys",
+		);
+
+		clearJarvisModelSelectionSetting(cwd, "project");
+		assert.equal(existsSync(getJarvisConfigPath(cwd, "project")), false);
+
+		clearJarvisThinkingSelectionSetting(cwd, "global");
+		assert.equal(loadJarvisThinkingSelectionSetting(cwd, "global"), undefined);
 		assert.equal(existsSync(getJarvisConfigPath(cwd, "global")), false);
 	} finally {
 		if (originalAgentDir === undefined) {
@@ -1879,6 +1928,10 @@ class FakeJarvisRuntime {
 	sendMessageCalls: string[] = [];
 	toolAccessEnabled = false;
 	nextSendError: Error | undefined;
+	compactCalls: Array<string | undefined> = [];
+	navigateTreeCalls: Array<{ targetId: string; summarize?: boolean; customInstructions?: string }> = [];
+	systemMessages: string[] = [];
+	treeDescription = "/jarvis session tree:\n  abc123 user: hello";
 
 	constructor(
 		public currentModel: TestModel | undefined,
@@ -1922,6 +1975,22 @@ class FakeJarvisRuntime {
 	async syncModel(model: TestModel | undefined, thinkingLevel: string | undefined): Promise<void> {
 		this.syncModelCalls.push({ model, thinkingLevel });
 		this.currentModel = model;
+	}
+
+	addSystemMessage(text: string): void {
+		this.systemMessages.push(text);
+	}
+
+	async compactJarvisContext(customInstructions?: string): Promise<void> {
+		this.compactCalls.push(customInstructions);
+	}
+
+	describeSessionTree(): string {
+		return this.treeDescription;
+	}
+
+	async navigateSessionTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string }): Promise<void> {
+		this.navigateTreeCalls.push({ targetId, ...options });
 	}
 
 	disposed = false;
@@ -2237,6 +2306,129 @@ async function testQueuedJarvisSendUsesDesiredThinkingLevel(): Promise<void> {
 			{ model: harness.pinnedModel, thinkingLevel: "off" },
 			"queued /jarvis sends should resync the live runtime using the effective Jarvis thinking policy",
 		);
+	});
+}
+
+async function testJarvisThinkingCommandPinsProjectThinkingLevel(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		await harness.api.runCommand("jarvis-thinking", "medium", harness.ctx);
+		assert.deepEqual(
+			loadJarvisThinkingSelectionSetting(harness.ctx.cwd, "project"),
+			{ mode: "pinned", thinkingLevel: "medium" },
+			"plain /jarvis-thinking should persist to the project config by default",
+		);
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.initialThinkingLevel, "medium", "a pinned /jarvis thinking level should be used when the runtime starts later");
+		assert.equal(harness.api.thinkingLevel, "high", "/jarvis-thinking must not mutate the main session thinking level");
+	});
+}
+
+async function testJarvisThinkingFollowMainSyncsPinnedModelRuntime(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		await harness.api.runCommand("jarvis-model", "side-beta", harness.ctx);
+		await harness.api.runCommand("jarvis-thinking", "follow-main", harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.initialThinkingLevel, "high", "follow-main thinking should use the main thinking level even with a pinned /jarvis model");
+
+		harness.api.thinkingLevel = "low";
+		harness.ctx.model = harness.nextMainModel;
+		await harness.api.emit("model_select", { model: harness.nextMainModel }, harness.ctx);
+
+		assert.deepEqual(
+			runtime.syncModelCalls.at(-1),
+			{ model: harness.pinnedModel, thinkingLevel: "low" },
+			"pinned /jarvis models should still resync when /jarvis thinking follows the main thinking level",
+		);
+	});
+}
+
+async function testJarvisThinkingProjectSettingOverridesGlobalSetting(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisThinkingSelectionSetting(harness.ctx.cwd, "global", { mode: "pinned", thinkingLevel: "low" });
+		saveJarvisThinkingSelectionSetting(harness.ctx.cwd, "project", { mode: "pinned", thinkingLevel: "xhigh" });
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.initialThinkingLevel, "xhigh", "the project /jarvis thinking setting should override the global setting");
+	});
+}
+
+async function testJarvisThinkingClearProjectFallsBackToGlobal(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisThinkingSelectionSetting(harness.ctx.cwd, "global", { mode: "pinned", thinkingLevel: "minimal" });
+		saveJarvisThinkingSelectionSetting(harness.ctx.cwd, "project", { mode: "pinned", thinkingLevel: "high" });
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.initialThinkingLevel, "high");
+
+		await harness.api.runCommand("jarvis-thinking", "clear --project", harness.ctx);
+		assert.equal(loadJarvisThinkingSelectionSetting(harness.ctx.cwd, "project"), undefined);
+		assert.deepEqual(
+			runtime.syncModelCalls.at(-1),
+			{ model: harness.mainModel, thinkingLevel: "minimal" },
+			"clearing project /jarvis thinking should fall back to the global thinking setting",
+		);
+	});
+}
+
+async function testXaiJarvisModelForcesExplicitThinkingOff(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		await harness.api.runCommand("jarvis-model", "xai/grok-standard", harness.ctx);
+		await harness.api.runCommand("jarvis-thinking", "xhigh", harness.ctx);
+
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.initialThinkingLevel, "off", "xAI /jarvis models should force thinking off even with an explicit /jarvis-thinking level");
+	});
+}
+
+async function testJarvisCompactCommandRunsInsideSideSession(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const runtime = await openJarvisRuntime(harness);
+
+		await harness.api.runCommand("jarvis", "/compact focus on current task", harness.ctx);
+		await waitForAsyncWork();
+
+		assert.deepEqual(
+			runtime.compactCalls,
+			["focus on current task"],
+			"/compact entered in /jarvis should compact the side session instead of being sent as a user prompt",
+		);
+		assert.deepEqual(runtime.sendMessageCalls, [], "/compact should not be sent to the /jarvis LLM as a normal prompt");
+	});
+}
+
+async function testJarvisTreeCommandListsAndNavigatesSideSessionTree(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const runtime = await openJarvisRuntime(harness);
+
+		await harness.api.runCommand("jarvis", "/tree", harness.ctx);
+		await waitForAsyncWork();
+		assert.deepEqual(runtime.systemMessages, [runtime.treeDescription], "/tree without an id should show the side-session tree");
+
+		await harness.api.runCommand("jarvis", "/tree --summarize abc123 preserve branch context", harness.ctx);
+		await waitForAsyncWork();
+		assert.deepEqual(
+			runtime.navigateTreeCalls,
+			[{ targetId: "abc123", summarize: true, customInstructions: "preserve branch context" }],
+			"/tree --summarize <id> should navigate the /jarvis session tree with summarization options",
+		);
+	});
+}
+
+async function testJarvisNewCommandStartsFreshSideSession(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const firstRuntime = await openJarvisRuntime(harness);
+
+		await harness.api.runCommand("jarvis", "/new", harness.ctx);
+		await waitForAsyncWork();
+
+		const nextRuntime = harness.getRuntime();
+		assert.ok(nextRuntime, "/new should leave /jarvis with a live runtime");
+		assert.notEqual(nextRuntime, firstRuntime, "/new should replace the side-session runtime");
+		assert.equal(firstRuntime.disposed, true, "/new should dispose the previous side-session runtime");
+		assert.deepEqual(nextRuntime.systemMessages, ["Started a new /jarvis side session."]);
 	});
 }
 
@@ -3205,6 +3397,7 @@ async function main(): Promise<void> {
 	await testSessionRef();
 	await testSessionRefDoesNotFallbackPastMalformedNewestEntry();
 	await testJarvisModelConfigRoundTrip();
+	await testJarvisThinkingConfigRoundTrip();
 	await testMalformedProjectJarvisModelConfigCanBeCleared();
 	await testMalformedGlobalJarvisModelConfigCanBeCleared();
 	await testOverlayFocusAndEscRouting();
@@ -3233,6 +3426,14 @@ async function main(): Promise<void> {
 	await testPinnedJarvisModelNotClobberedByMainModelSelect();
 	await testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime();
 	await testQueuedJarvisSendUsesDesiredThinkingLevel();
+	await testJarvisThinkingCommandPinsProjectThinkingLevel();
+	await testJarvisThinkingFollowMainSyncsPinnedModelRuntime();
+	await testJarvisThinkingProjectSettingOverridesGlobalSetting();
+	await testJarvisThinkingClearProjectFallsBackToGlobal();
+	await testXaiJarvisModelForcesExplicitThinkingOff();
+	await testJarvisCompactCommandRunsInsideSideSession();
+	await testJarvisTreeCommandListsAndNavigatesSideSessionTree();
+	await testJarvisNewCommandStartsFreshSideSession();
 	await testQueuedJarvisSendRetriesAfterTransientFailure();
 	await testJarvisOverlayToolToggleSyncsRuntime();
 	await testJarvisOverlaySkipsReconnectTextForMissingSessionRef();

@@ -11,7 +11,18 @@ import { buildMainSessionContext, type MainSessionContextPayload } from "./main-
 import { MainSessionTracker } from "./main-session-state.js";
 import { attachOverlayBridge, JarvisOverlayBridge, JarvisOverlayComponent, type JarvisDisplayEntry, type JarvisOverlayView } from "./overlay.js";
 import { createJarvisSessionRef, readJarvisSessionRef, JARVIS_SESSION_REF_CUSTOM_TYPE, type JarvisSessionRef } from "./session-ref.js";
-import { clearJarvisModelSelectionSetting, loadJarvisModelSelectionSetting, saveJarvisModelSelectionSetting, type JarvisModelSelectionScope, type StoredJarvisModelSelection } from "./jarvis-config.js";
+import {
+	clearJarvisModelSelectionSetting,
+	clearJarvisThinkingSelectionSetting,
+	loadJarvisModelSelectionSetting,
+	loadJarvisThinkingSelectionSetting,
+	saveJarvisModelSelectionSetting,
+	saveJarvisThinkingSelectionSetting,
+	type JarvisModelSelectionScope,
+	type JarvisThinkingLevel,
+	type StoredJarvisModelSelection,
+	type StoredJarvisThinkingSelection,
+} from "./jarvis-config.js";
 import { JarvisSideSessionRuntime, createSideSessionFile } from "./side-session.js";
 
 type JarvisModelSelection =
@@ -19,8 +30,17 @@ type JarvisModelSelection =
 	| { mode: "pinned"; model: Model<any> };
 
 type JarvisModelSelectionSource = JarvisModelSelectionScope | "default";
+type JarvisThinkingSelectionSource = JarvisModelSelectionScope | "default";
+
+type JarvisThinkingSelection = StoredJarvisThinkingSelection;
 
 type ParsedJarvisModelCommand = {
+	request: string;
+	scope: JarvisModelSelectionScope;
+	clearScope: boolean;
+};
+
+type ParsedJarvisThinkingCommand = {
 	request: string;
 	scope: JarvisModelSelectionScope;
 	clearScope: boolean;
@@ -34,6 +54,16 @@ type ResolvedJarvisModelSelection = {
 		modelReference: string;
 	};
 };
+
+type ResolvedJarvisThinkingSelection = {
+	selection: JarvisThinkingSelection;
+	source: JarvisThinkingSelectionSource;
+};
+
+type JarvisSideCommand =
+	| { name: "compact"; customInstructions?: string }
+	| { name: "new" }
+	| { name: "tree"; targetId?: string; summarize: boolean; customInstructions?: string };
 
 type MainState = {
 	bridge: JarvisOverlayBridge;
@@ -49,6 +79,8 @@ type MainState = {
 	model?: Model<any>;
 	jarvisModelSelection: JarvisModelSelection;
 	jarvisModelSelectionSource: JarvisModelSelectionSource;
+	jarvisThinkingSelection: JarvisThinkingSelection;
+	jarvisThinkingSelectionSource: JarvisThinkingSelectionSource;
 	thinkingLevel?: string;
 	systemPrompt: string;
 	themeProvider: () => ExtensionContext["ui"]["theme"];
@@ -78,6 +110,8 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		queuedMessages: [],
 		jarvisModelSelection: { mode: "follow-main" },
 		jarvisModelSelectionSource: "default",
+		jarvisThinkingSelection: { mode: "auto" },
+		jarvisThinkingSelectionSource: "default",
 		systemPrompt: "",
 		themeProvider: () => {
 			throw new Error("/jarvis theme requested before UI was available.");
@@ -299,6 +333,106 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("jarvis-thinking", {
+		description: "Set the thinking level used by /jarvis without changing the main agent thinking level",
+		handler: async (args, ctx) => {
+			updateContextState(pi, state, ctx);
+
+			let parsedCommand: ParsedJarvisThinkingCommand;
+			try {
+				parsedCommand = parseJarvisThinkingCommand(args);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				return;
+			}
+
+			const { request, scope, clearScope } = parsedCommand;
+			const scopeLabel = formatJarvisModelSelectionScope(scope);
+
+			const rollbackSelection = async (
+				previousSelection: JarvisThinkingSelection,
+				previousSource: JarvisThinkingSelectionSource,
+			): Promise<void> => {
+				await applyJarvisThinkingSelection(state, previousSelection);
+				state.jarvisThinkingSelectionSource = previousSource;
+			};
+
+			const persistSelection = async (selection: JarvisThinkingSelection): Promise<void> => {
+				const previousSelection = state.jarvisThinkingSelection;
+				const previousSource = state.jarvisThinkingSelectionSource;
+				await applyJarvisThinkingSelection(state, selection);
+				try {
+					saveJarvisThinkingSelectionSetting(ctx.cwd, scope, selection);
+					state.jarvisThinkingSelectionSource = scope;
+				} catch (error) {
+					await rollbackSelection(previousSelection, previousSource);
+					throw error;
+				}
+			};
+
+			const clearScopedSelection = async (): Promise<ResolvedJarvisThinkingSelection> => {
+				const previousSelection = state.jarvisThinkingSelection;
+				const previousSource = state.jarvisThinkingSelectionSource;
+				const projectSelection = scope === "project" ? undefined : loadJarvisThinkingSelectionSetting(ctx.cwd, "project");
+				const globalSelection = scope === "global" ? undefined : loadJarvisThinkingSelectionSetting(ctx.cwd, "global");
+				const resolvedSelection = resolveJarvisThinkingSelectionFromSettings(projectSelection, globalSelection);
+				await applyJarvisThinkingSelection(state, resolvedSelection.selection);
+				try {
+					clearJarvisThinkingSelectionSetting(ctx.cwd, scope);
+					state.jarvisThinkingSelectionSource = resolvedSelection.source;
+					return resolvedSelection;
+				} catch (error) {
+					await rollbackSelection(previousSelection, previousSource);
+					throw error;
+				}
+			};
+
+			if (clearScope) {
+				try {
+					await clearScopedSelection();
+				} catch (error) {
+					ctx.ui.notify(
+						`Failed to clear the /jarvis thinking setting ${scopeLabel}: ${error instanceof Error ? error.message : String(error)}`,
+						"error",
+					);
+					return;
+				}
+				ctx.ui.notify(`Cleared the /jarvis thinking setting ${scopeLabel}. /jarvis is now ${describeJarvisThinkingSelection(state)}.`, "info");
+				return;
+			}
+
+			const normalizedRequest = request.toLowerCase();
+			let selection: JarvisThinkingSelection | undefined;
+			if (normalizedRequest === "auto") {
+				selection = { mode: "auto" };
+			} else if (normalizedRequest === "follow-main") {
+				selection = { mode: "follow-main" };
+			} else if (isJarvisThinkingLevel(normalizedRequest)) {
+				selection = { mode: "pinned", thinkingLevel: normalizedRequest };
+			}
+
+			if (!selection) {
+				ctx.ui.notify(
+					`/jarvis is ${describeJarvisThinkingSelection(state)}. Use /jarvis-thinking [--project|--global] clear, auto, follow-main, off, minimal, low, medium, high, or xhigh.`,
+					request ? "error" : "info",
+				);
+				return;
+			}
+
+			try {
+				await persistSelection(selection);
+			} catch (error) {
+				ctx.ui.notify(
+					`Failed to set /jarvis thinking ${scopeLabel}: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+				return;
+			}
+
+			ctx.ui.notify(`Set /jarvis thinking to ${formatJarvisThinkingSelection(selection)} ${scopeLabel}. Effective /jarvis thinking is ${getDesiredJarvisThinkingLevel(state) ?? "off"}.`, "info");
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		state.bootGeneration += 1;
 		state.runtime?.dispose();
@@ -318,12 +452,21 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 			selection: { mode: "follow-main" },
 			source: "default",
 		};
+		let resolvedThinkingSelection: ResolvedJarvisThinkingSelection = {
+			selection: { mode: "auto" },
+			source: "default",
+		};
 		resolvedSelection = resolveConfiguredJarvisModelSelection(ctx.cwd, ctx.modelRegistry, (scope, error) => {
 			ctx.ui.notify(`Failed to load the ${scope} /jarvis model setting: ${error instanceof Error ? error.message : String(error)}`, "error");
+		});
+		resolvedThinkingSelection = resolveConfiguredJarvisThinkingSelection(ctx.cwd, (scope, error) => {
+			ctx.ui.notify(`Failed to load the ${scope} /jarvis thinking setting: ${error instanceof Error ? error.message : String(error)}`, "error");
 		});
 
 		state.jarvisModelSelection = resolvedSelection.selection;
 		state.jarvisModelSelectionSource = resolvedSelection.source;
+		state.jarvisThinkingSelection = resolvedThinkingSelection.selection;
+		state.jarvisThinkingSelectionSource = resolvedThinkingSelection.source;
 		updateContextState(pi, state, ctx);
 		enforceCompatibilityGuard(state);
 		if (resolvedSelection.unavailable) {
@@ -383,7 +526,10 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		state.mainSession.handleModelSelect(formatModelLabel(event.model));
 		refreshMainContext(state);
 		enforceCompatibilityGuard(state);
-		if (!state.runtime || state.jarvisModelSelection.mode !== "follow-main") {
+		if (
+			!state.runtime ||
+			(state.jarvisModelSelection.mode !== "follow-main" && state.jarvisThinkingSelection.mode !== "follow-main")
+		) {
 			return;
 		}
 		try {
@@ -403,6 +549,8 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 		state.lastJarvisSeenMainContext = undefined;
 		state.jarvisModelSelection = { mode: "follow-main" };
 		state.jarvisModelSelectionSource = "default";
+		state.jarvisThinkingSelection = { mode: "auto" };
+		state.jarvisThinkingSelectionSource = "default";
 		state.allowSideTools = false;
 		state.allowFollowUpToMain = false;
 		state.allowSteerToMain = false;
@@ -436,6 +584,12 @@ function getDesiredJarvisThinkingLevel(state: MainState): string | undefined {
 	const desiredModel = getDesiredJarvisModel(state);
 	if (desiredModel?.provider === "xai") {
 		return "off";
+	}
+	if (state.jarvisThinkingSelection.mode === "pinned") {
+		return state.jarvisThinkingSelection.thinkingLevel;
+	}
+	if (state.jarvisThinkingSelection.mode === "follow-main") {
+		return state.thinkingLevel;
 	}
 	return state.jarvisModelSelection.mode === "follow-main" ? state.thinkingLevel : "off";
 }
@@ -484,6 +638,34 @@ function parseJarvisModelCommand(args: string): ParsedJarvisModelCommand {
 		scope,
 		clearScope: request.toLowerCase() === "clear",
 	};
+}
+
+function parseJarvisThinkingCommand(args: string): ParsedJarvisThinkingCommand {
+	const parsed = parseJarvisModelCommand(args);
+	return {
+		request: parsed.request,
+		scope: parsed.scope,
+		clearScope: parsed.clearScope,
+	};
+}
+
+function isJarvisThinkingLevel(value: string): value is JarvisThinkingLevel {
+	return value === "off" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+}
+
+function formatJarvisThinkingSelection(selection: JarvisThinkingSelection): string {
+	if (selection.mode === "auto") {
+		return "auto";
+	}
+	if (selection.mode === "follow-main") {
+		return "follow-main";
+	}
+	return selection.thinkingLevel;
+}
+
+function describeJarvisThinkingSelection(state: MainState): string {
+	const sourceLabel = formatJarvisModelSelectionSource(state.jarvisThinkingSelectionSource);
+	return `thinking ${formatJarvisThinkingSelection(state.jarvisThinkingSelection)} (effective ${getDesiredJarvisThinkingLevel(state) ?? "off"}; ${sourceLabel})`;
 }
 
 function resolveStoredJarvisModelSelection(
@@ -567,6 +749,41 @@ function resolveConfiguredJarvisModelSelection(
 	}
 
 	return resolveJarvisModelSelectionFromSettings(projectSelection, globalSelection, modelRegistry);
+}
+
+function resolveJarvisThinkingSelectionFromSettings(
+	projectSelection: StoredJarvisThinkingSelection | undefined,
+	globalSelection: StoredJarvisThinkingSelection | undefined,
+): ResolvedJarvisThinkingSelection {
+	if (projectSelection) {
+		return { selection: projectSelection, source: "project" };
+	}
+	if (globalSelection) {
+		return { selection: globalSelection, source: "global" };
+	}
+	return { selection: { mode: "auto" }, source: "default" };
+}
+
+function resolveConfiguredJarvisThinkingSelection(
+	cwd: string,
+	onScopeError?: (scope: JarvisModelSelectionScope, error: unknown) => void,
+): ResolvedJarvisThinkingSelection {
+	let projectSelection: StoredJarvisThinkingSelection | undefined;
+	let globalSelection: StoredJarvisThinkingSelection | undefined;
+
+	try {
+		projectSelection = loadJarvisThinkingSelectionSetting(cwd, "project");
+	} catch (error) {
+		onScopeError?.("project", error);
+	}
+
+	try {
+		globalSelection = loadJarvisThinkingSelectionSetting(cwd, "global");
+	} catch (error) {
+		onScopeError?.("global", error);
+	}
+
+	return resolveJarvisThinkingSelectionFromSettings(projectSelection, globalSelection);
 }
 
 
@@ -680,6 +897,60 @@ async function applyJarvisModelSelection(state: MainState, selection: JarvisMode
 	}
 }
 
+async function applyJarvisThinkingSelection(state: MainState, selection: JarvisThinkingSelection): Promise<void> {
+	const previousSelection = state.jarvisThinkingSelection;
+	state.jarvisThinkingSelection = selection;
+	try {
+		await syncRuntimeModelSelection(state);
+	} catch (error) {
+		state.jarvisThinkingSelection = previousSelection;
+		try {
+			await syncRuntimeModelSelection(state);
+		} catch {
+			// Keep the original sync failure; rollback is best-effort only.
+		}
+		throw error;
+	}
+}
+
+async function executeJarvisSideCommand(
+	pi: ExtensionAPI,
+	state: MainState,
+	ctx: ExtensionCommandContext,
+	runtime: JarvisSideSessionRuntime,
+	command: JarvisSideCommand,
+): Promise<JarvisSideSessionRuntime> {
+	if (command.name === "compact") {
+		await runtime.compactJarvisContext(command.customInstructions);
+		return runtime;
+	}
+	if (command.name === "tree") {
+		if (!command.targetId) {
+			runtime.addSystemMessage(runtime.describeSessionTree());
+			return runtime;
+		}
+		await runtime.navigateSessionTree(command.targetId, {
+			summarize: command.summarize,
+			customInstructions: command.customInstructions,
+		});
+		return runtime;
+	}
+
+	state.bootGeneration += 1;
+	state.runtime?.dispose();
+	state.runtime = undefined;
+	state.bootPromise = undefined;
+	state.flushPromise = undefined;
+	state.lastJarvisSeenMainContext = undefined;
+	const sessionFile = await createSideSessionFile(ctx.cwd);
+	const sessionRef = createJarvisSessionRef(sessionFile);
+	state.sessionRef = sessionRef;
+	pi.appendEntry(JARVIS_SESSION_REF_CUSTOM_TYPE, sessionRef);
+	const nextRuntime = await ensureRuntime(pi, state, ctx);
+	nextRuntime.addSystemMessage("Started a new /jarvis side session.");
+	return nextRuntime;
+}
+
 function normalizeInitialMessage(args: string): string | undefined {
 	const message = args.trim();
 	return message.length > 0 ? message : undefined;
@@ -687,6 +958,39 @@ function normalizeInitialMessage(args: string): string | undefined {
 
 function queueMessage(state: MainState, message: string): void {
 	state.queuedMessages.push(message);
+}
+
+function parseJarvisSideCommand(message: string): JarvisSideCommand | undefined {
+	const text = message.trim();
+	if (text === "/new") {
+		return { name: "new" };
+	}
+	if (text === "/compact") {
+		return { name: "compact" };
+	}
+	if (text.startsWith("/compact ")) {
+		return { name: "compact", customInstructions: text.slice("/compact ".length).trim() || undefined };
+	}
+	if (text === "/tree") {
+		return { name: "tree", summarize: false };
+	}
+	if (text.startsWith("/tree ")) {
+		const args = text.slice("/tree ".length).trim();
+		const summarizePrefix = "--summarize ";
+		if (args.startsWith(summarizePrefix)) {
+			const rest = args.slice(summarizePrefix.length).trim();
+			const [targetId, ...instructionTokens] = rest.split(/\s+/).filter(Boolean);
+			return {
+				name: "tree",
+				targetId,
+				summarize: true,
+				customInstructions: instructionTokens.join(" ").trim() || undefined,
+			};
+		}
+		const [targetId] = args.split(/\s+/).filter(Boolean);
+		return { name: "tree", targetId, summarize: false };
+	}
+	return undefined;
 }
 
 function createOverlayView(pi: ExtensionAPI, state: MainState, ctx: ExtensionCommandContext): JarvisOverlayView {
@@ -808,17 +1112,23 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 	// rethrowing.
 	state.flushPromise = (async () => {
 		try {
-			const runtime = await ensureRuntime(pi, state, ctx);
+			let runtime = await ensureRuntime(pi, state, ctx);
 			await runtime.syncModel(getDesiredJarvisModel(state), getDesiredJarvisThinkingLevel(state));
 
 			while (state.queuedMessages.length > 0) {
 				const message = state.queuedMessages[0]!;
+				const command = parseJarvisSideCommand(message);
 				try {
-					await runtime.sendMessage(message);
+					if (command) {
+						runtime = await executeJarvisSideCommand(pi, state, ctx, runtime, command);
+					} else {
+						await runtime.sendMessage(message);
+					}
 					state.queuedMessages.shift();
 					state.lastJarvisSeenMainContext = state.mainContext;
 				} catch (error) {
-					state.bridge.notify(`Failed to send /jarvis message: ${error instanceof Error ? error.message : String(error)}`, "error");
+					const action = command ? `run ${message.split(/\s+/, 1)[0]}` : "send /jarvis message";
+					state.bridge.notify(`Failed to ${action}: ${error instanceof Error ? error.message : String(error)}`, "error");
 					break;
 				}
 			}

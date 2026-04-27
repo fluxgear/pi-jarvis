@@ -13,6 +13,7 @@ import {
 	type AgentSessionEvent,
 	type ExtensionAPI,
 	type ExtensionContext,
+	type SessionEntry,
 } from "@mariozechner/pi-coding-agent";
 import { JarvisOverlayBridge, type JarvisDisplayEntry } from "./overlay.js";
 
@@ -30,6 +31,13 @@ const OPTIONAL_SIDE_TOOL_NAMES = ["read", "bash", "edit", "write", "mcp"] as con
 const require = createRequire(import.meta.url);
 
 type SideSessionHandle = Awaited<ReturnType<typeof createAgentSession>>["session"];
+
+type SideSessionTreeNode = {
+	entry: SessionEntry;
+	children: SideSessionTreeNode[];
+	label?: string;
+	labelTimestamp?: string;
+};
 
 type SideRuntimeCreateOptions = {
 	bridge: JarvisOverlayBridge;
@@ -76,6 +84,7 @@ export class JarvisSideSessionRuntime {
 	private session?: SideSessionHandle;
 	private unsubscribe?: () => void;
 	private historyEntries: JarvisDisplayEntry[] = [];
+	private localStatusEntries: JarvisDisplayEntry[] = [];
 	private streamingAssistant?: AssistantMessage;
 	private pendingUserMessage?: string;
 	private pendingToolCalls = new Map<string, string>();
@@ -125,7 +134,7 @@ export class JarvisSideSessionRuntime {
 	}
 
 	getDisplayEntries(): JarvisDisplayEntry[] {
-		const entries = [...this.historyEntries];
+		const entries = [...this.historyEntries, ...this.localStatusEntries];
 		const latestUserEntry = [...entries].reverse().find((entry) => entry.kind === "user");
 
 		if (this.pendingUserMessage && latestUserEntry?.text !== this.pendingUserMessage) {
@@ -169,6 +178,53 @@ export class JarvisSideSessionRuntime {
 			return;
 		}
 		await this.session.prompt(text);
+	}
+
+	addSystemMessage(text: string): void {
+		this.localStatusEntries.push({ kind: "system", text });
+		this.trimLocalStatusEntries();
+	}
+
+	async compactJarvisContext(customInstructions?: string): Promise<void> {
+		if (!this.session) {
+			throw new Error("/jarvis session is not ready.");
+		}
+		this.bridge.setWorkingMessage("Compacting /jarvis…");
+		try {
+			const result = await this.session.compact(customInstructions);
+			this.refreshHistory();
+			const tokenLabel = Number.isFinite(result.tokensBefore) ? ` (${Math.round(result.tokensBefore / 1000)}k tokens summarized)` : "";
+			this.addSystemMessage(`Compacted /jarvis context${tokenLabel}.`);
+		} finally {
+			this.bridge.setWorkingMessage(undefined);
+		}
+	}
+
+	describeSessionTree(): string {
+		if (!this.session) {
+			throw new Error("/jarvis session is not ready.");
+		}
+		return formatSideSessionTree(this.session.sessionManager.getTree(), this.session.sessionManager.getLeafId());
+	}
+
+	async navigateSessionTree(
+		targetId: string,
+		options: { summarize?: boolean; customInstructions?: string } = {},
+	): Promise<void> {
+		if (!this.session) {
+			throw new Error("/jarvis session is not ready.");
+		}
+		const result = await this.session.navigateTree(targetId, options);
+		if (result.cancelled) {
+			this.addSystemMessage("/jarvis tree navigation cancelled.");
+			return;
+		}
+		this.refreshHistory();
+		if (result.editorText) {
+			this.addSystemMessage(`Navigated to ${targetId}. Re-run or edit this prior user message if needed:\n\n${result.editorText}`);
+		} else {
+			this.addSystemMessage(`Navigated /jarvis session tree to ${targetId}.`);
+		}
 	}
 
 	async syncModel(model: Model<any> | undefined, thinkingLevel: string | undefined): Promise<void> {
@@ -284,6 +340,17 @@ export class JarvisSideSessionRuntime {
 			case "agent_start":
 				this.bridge.setWorkingMessage("Thinking…");
 				break;
+			case "compaction_start":
+				this.bridge.setWorkingMessage("Compacting /jarvis…");
+				break;
+			case "compaction_end":
+				this.bridge.setWorkingMessage(undefined);
+				if (event.aborted) {
+					this.addSystemMessage("/jarvis compaction cancelled.");
+				} else if (event.errorMessage) {
+					this.addSystemMessage(event.errorMessage);
+				}
+				break;
 			case "agent_end":
 				this.bridge.setWorkingMessage(undefined);
 				this.streamingAssistant = undefined;
@@ -333,6 +400,89 @@ export class JarvisSideSessionRuntime {
 		}
 		this.modelLabel = formatModelLabel(this.session.model);
 	}
+
+	private trimLocalStatusEntries(): void {
+		if (this.localStatusEntries.length > 12) {
+			this.localStatusEntries = this.localStatusEntries.slice(-12);
+		}
+	}
+}
+
+function formatSideSessionTree(tree: SideSessionTreeNode[], leafId: string | null): string {
+	if (tree.length === 0) {
+		return "No entries in the /jarvis session tree yet.";
+	}
+
+	const lines = [
+		"/jarvis session tree:",
+		"Use `/tree <entry-id>` to navigate, or `/tree --summarize <entry-id> [custom instructions]` to summarize the branch you leave.",
+	];
+	for (let index = 0; index < tree.length; index += 1) {
+		appendSideSessionTreeNode(lines, tree[index]!, leafId, "", index === tree.length - 1);
+	}
+	return lines.join("\n");
+}
+
+function appendSideSessionTreeNode(
+	lines: string[],
+	node: SideSessionTreeNode,
+	leafId: string | null,
+	prefix: string,
+	isLast: boolean,
+): void {
+	const connector = prefix ? (isLast ? "└─" : "├─") : "";
+	const currentMarker = node.entry.id === leafId ? "*" : " ";
+	const label = node.label ? ` [${node.label}]` : "";
+	lines.push(`${prefix}${connector}${currentMarker} ${node.entry.id}${label} ${formatSideSessionTreeEntry(node.entry)}`.trimEnd());
+
+	const childPrefix = `${prefix}${prefix ? (isLast ? "  " : "│ ") : ""}`;
+	for (let index = 0; index < node.children.length; index += 1) {
+		appendSideSessionTreeNode(lines, node.children[index]!, leafId, childPrefix, index === node.children.length - 1);
+	}
+}
+
+function formatSideSessionTreeEntry(entry: SessionEntry): string {
+	switch (entry.type) {
+		case "message": {
+			const role = entry.message.role;
+			if (role === "user") {
+				return `user: ${truncateTreeText(extractTextContent(entry.message.content))}`;
+			}
+			if (role === "assistant") {
+				return `assistant: ${truncateTreeText(extractAssistantText(entry.message as AssistantMessage))}`;
+			}
+			if (role === "toolResult") {
+				return `tool result: ${entry.message.toolName}`;
+			}
+			return role;
+		}
+		case "compaction":
+			return `compaction: ${truncateTreeText(entry.summary)}`;
+		case "branch_summary":
+			return `branch summary: ${truncateTreeText(entry.summary)}`;
+		case "custom_message":
+			return `custom: ${truncateTreeText(extractTextContent(entry.content))}`;
+		case "model_change":
+			return `model: ${entry.provider}/${entry.modelId}`;
+		case "thinking_level_change":
+			return `thinking: ${entry.thinkingLevel}`;
+		case "session_info":
+			return entry.name ? `name: ${entry.name}` : "name cleared";
+		case "label":
+			return entry.label ? `label: ${entry.label}` : "label cleared";
+		case "custom":
+			return `custom: ${entry.customType}`;
+		default:
+			return "entry";
+	}
+}
+
+function truncateTreeText(text: string, maxLength = 96): string {
+	const normalized = text.replace(/\s+/g, " ").trim();
+	if (!normalized) {
+		return "(no text)";
+	}
+	return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
 }
 
 function createSideExtensionFactory(

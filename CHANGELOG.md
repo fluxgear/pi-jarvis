@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > Historical note: releases before the `pi-jarvis` 1.x line refer to the project's earlier `pi-btw` and `/btw` naming. Those entries are preserved as historical release records and do not describe the current product name or command surface.
 
+## [1.3.0] - 2026-04-27
+
+### Added
+- Added `/jarvis-thinking` with project/global `auto`, `follow-main`, explicit thinking-level, and `clear` settings so `/jarvis` thinking can be configured independently from the main session.
+- Added side-session handling for `/compact`, `/tree`, and `/new` when those commands are entered inside `/jarvis`.
+
+### Changed
+- Documented the `/jarvis-thinking` and side-session `/compact`/`/tree`/`/new` command behavior and expanded regression coverage for thinking config precedence, runtime sync, xAI forced-off behavior, and side-session command routing.
+
 ## [1.2.3] - 2026-04-23
 
 ### Fixed

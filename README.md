@@ -165,9 +165,29 @@ Restores the chosen scope to `follow-main`. A project-scoped `follow-main` overr
 ### `/jarvis-model [--project|--global] clear`
 Removes the selected scope so `/jarvis` falls back through the remaining config layers to the built-in default.
 
+### `/jarvis-thinking [--project|--global] auto|follow-main|off|minimal|low|medium|high|xhigh`
+Sets the thinking level used by `/jarvis` without changing the main session thinking level. A plain `/jarvis-thinking <level>` writes a **project-local** override to `.pi/jarvis.json`.
+
+- `auto` preserves the built-in behavior: follow the main thinking level only when `/jarvis` follows the main model; pinned `/jarvis` models use `off`.
+- `follow-main` follows the main thinking level even when `/jarvis` is pinned to a separate model.
+- Explicit levels pin `/jarvis` thinking to that level.
+- xAI `/jarvis` models still force thinking `off`.
+
+### `/jarvis-thinking [--project|--global] clear`
+Removes the selected scope so `/jarvis` thinking falls back through the remaining config layers to the built-in `auto` default.
+
+### Side-session commands inside `/jarvis`
+The `/jarvis` input handles a small set of built-in commands against the isolated side-session:
+
+- `/compact [instructions]` compacts the `/jarvis` conversation context.
+- `/tree` prints the `/jarvis` session tree with entry IDs.
+- `/tree <entry-id>` navigates the `/jarvis` session tree to that entry.
+- `/tree --summarize <entry-id> [instructions]` navigates and summarizes the branch being left.
+- `/new` starts a fresh `/jarvis` side-session without changing the main Pi session.
+
 ---
 
-## Model resolution
+## Model and thinking resolution
 
 ```mermaid
 flowchart TD
@@ -182,9 +202,11 @@ flowchart TD
 
 ### Resolution order
 
+Both model and thinking settings resolve through the same config layers:
+
 1. project config: `.pi/jarvis.json`
 2. global config: `~/.pi/agent/extensions/pi-jarvis.json` or the equivalent path under a custom Pi agent dir
-3. built-in default: `follow-main`
+3. built-in defaults: model `follow-main`, thinking `auto`
 
 ---
 
@@ -246,7 +268,9 @@ sequenceDiagram
 - `/jarvis` keeps its own isolated conversation state
 - prior side-session history is restored from a session file under `jarvis-sessions/`
 - Jarvis sees current main-session state plus a compact delta since the last `/jarvis` turn
-- plain `/jarvis-model <provider/model>` writes the project override; use `--global` to change the global default
+- `/compact`, `/tree`, and `/new` entered inside `/jarvis` operate on the side-session, not the main session
+- plain `/jarvis-model <provider/model>` writes the project model override; use `--global` to change the global default
+- plain `/jarvis-thinking <level>` writes the project thinking override; use `--global` to change the global default
 - thinking-step streaming is intentionally collapsed to a cleaner animated fallback for readability
 
 ---
