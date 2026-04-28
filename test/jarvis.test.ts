@@ -35,7 +35,7 @@ import {
 	saveJarvisModelSelectionSetting,
 	saveJarvisThinkingSelectionSetting,
 } from "../jarvis-config.js";
-import { JarvisSideSessionRuntime, createSideSessionFile } from "../side-session.js";
+import { JarvisSideSessionRuntime, createSideSessionFile, getJarvisSessionDirectory } from "../side-session.js";
 import jarvisExtension from "../index.js";
 
 class FakeTerminal implements Terminal {
@@ -169,6 +169,63 @@ function createTestOverlayView(overrides: Partial<Omit<TestOverlayViewState, "se
 
 function flushTicks(): Promise<void> {
 	return new Promise((resolve) => process.nextTick(resolve));
+}
+
+function stripAnsiSequences(value: string): string {
+	return value
+		.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
+		.replace(/\x1b[P^_X][\s\S]*?\x1b\\/g, "")
+		.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+		.replace(/\x1b/g, "");
+}
+
+function getOverlayInputValue(lines: readonly string[]): string {
+	const inputLine = lines
+		.map((line) => stripAnsiSequences(line))
+		.find((line) => line.includes("› ") || line.includes("> "));
+	assert.ok(inputLine, "overlay render should include an input line");
+	const promptIndex = inputLine.includes("› ") ? inputLine.indexOf("› ") : inputLine.indexOf("> ");
+	const rawValue = inputLine.slice(promptIndex + 2);
+	return rawValue
+		.replace(/_pi:[A-Za-z]+/g, "")
+		.replace(/[^ -~]/g, "")
+		.replace(/^>\s*/, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function createOverlayCaptureHarness(harness: JarvisExtensionHarness): {
+	getCapturedOverlay: () => JarvisOverlayComponent | undefined;
+	restore: () => void;
+} {
+	type OverlayFactory = (
+		host: { requestRender: () => void; terminal: { rows: number } },
+		overlayTheme: typeof theme,
+		state: unknown,
+		onClose: () => void,
+	) => JarvisOverlayComponent;
+
+	const originalCustom = harness.ctx.ui.custom;
+	let capturedOverlay: JarvisOverlayComponent | undefined;
+	harness.ctx.ui.custom = async (...args: unknown[]) => {
+		const [factory] = args;
+		if (typeof factory === "function") {
+			capturedOverlay = (factory as OverlayFactory)(
+				{ requestRender: () => {}, terminal: { rows: 40 } },
+				harness.ctx.ui.theme,
+				{},
+				() => {},
+			);
+		}
+		return originalCustom.call(harness.ctx.ui, ...args);
+	};
+
+	return {
+		getCapturedOverlay: () => capturedOverlay,
+		restore: () => {
+			harness.ctx.ui.custom = originalCustom;
+		},
+	};
 }
 
 function createMinimalMainContextPayload() {
@@ -334,6 +391,50 @@ async function testMalformedGlobalJarvisModelConfigCanBeCleared(): Promise<void>
 		} else {
 			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testMalformedJarvisConfigCanBeRepairedBySavingSetting(): Promise<void> {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-config-test-"));
+	const agentDir = join(tempRoot, "agent");
+	const cwd = join(tempRoot, "project");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(cwd, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+
+	try {
+		const projectPath = getJarvisConfigPath(cwd, "project");
+		mkdirSync(dirname(projectPath), { recursive: true });
+		writeFileSync(projectPath, "{ invalid json\n", "utf8");
+		saveJarvisModelSelectionSetting(cwd, "project", { mode: "pinned", provider: "test-provider", modelId: "side-beta" });
+		assert.deepEqual(loadJarvisModelSelectionSetting(cwd, "project"), { mode: "pinned", provider: "test-provider", modelId: "side-beta" });
+
+		const globalPath = getJarvisConfigPath(cwd, "global");
+		mkdirSync(dirname(globalPath), { recursive: true });
+		writeFileSync(globalPath, "{ invalid json\n", "utf8");
+		saveJarvisThinkingSelectionSetting(cwd, "global", { mode: "pinned", thinkingLevel: "low" });
+		assert.deepEqual(loadJarvisThinkingSelectionSetting(cwd, "global"), { mode: "pinned", thinkingLevel: "low" });
+	} finally {
+		if (originalAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		}
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+async function testJarvisSessionDirectoryAvoidsWorkspacePathCollisions(): Promise<void> {
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-jarvis-session-dir-test-"));
+	try {
+		const first = getJarvisSessionDirectory("/tmp/a:b", tempRoot);
+		const second = getJarvisSessionDirectory("/tmp/a/b", tempRoot);
+		assert.notEqual(first, second, "distinct workspace paths must not map to the same /jarvis session directory");
+		assert.ok(existsSync(first));
+		assert.ok(existsSync(second));
+	} finally {
 		rmSync(tempRoot, { recursive: true, force: true });
 	}
 }
@@ -565,27 +666,27 @@ async function testJarvisOverlayInputHistoryNavigatesUserMessages(): Promise<voi
 	
 	// Up -> second message
 	overlay.handleInput("\x1b[A");
-	assert.equal((overlay as any).input.getValue(), "second message", "Up arrow should load the most recent user message");
+	assert.equal(getOverlayInputValue(overlay.render(80)), "second message", "Up arrow should load the most recent user message");
 
 	// Up -> first message
 	overlay.handleInput("\x1b[A");
-	assert.equal((overlay as any).input.getValue(), "first message", "Up arrow again should load the older user message");
+	assert.equal(getOverlayInputValue(overlay.render(80)), "first message", "Up arrow again should load the older user message");
 
 	// Up -> clamped to first message
 	overlay.handleInput("\x1b[A");
-	assert.equal((overlay as any).input.getValue(), "first message", "Up arrow should clamp at the oldest user message");
+	assert.equal(getOverlayInputValue(overlay.render(80)), "first message", "Up arrow should clamp at the oldest user message");
 
 	// Down -> second message
 	overlay.handleInput("\x1b[B");
-	assert.equal((overlay as any).input.getValue(), "second message", "Down arrow should navigate forward to the newer user message");
+	assert.equal(getOverlayInputValue(overlay.render(80)), "second message", "Down arrow should navigate forward to the newer user message");
 
 	// Down -> draft restored
 	overlay.handleInput("\x1b[B");
-	assert.equal((overlay as any).input.getValue(), "Draft", "Down arrow at the end should restore the original input draft");
+	assert.equal(getOverlayInputValue(overlay.render(80)), "Draft", "Down arrow at the end should restore the original input draft");
 
 	// Down -> clamped at draft
 	overlay.handleInput("\x1b[B");
-	assert.equal((overlay as any).input.getValue(), "Draft", "Down arrow should clamp at the draft");
+	assert.equal(getOverlayInputValue(overlay.render(80)), "Draft", "Down arrow should clamp at the draft");
 }
 
 async function testSideSessionPersistence(): Promise<void> {
@@ -764,6 +865,39 @@ async function testSideSessionSanitizesMultilineLeakedToolScaffolding(): Promise
 		assert.ok(!assistantEntry!.text.includes("to=read"));
 		assert.ok(!assistantEntry!.text.includes("filePath"));
 		assert.ok(assistantEntry!.text.includes("All set - I inspected README.md."));
+	});
+}
+
+async function testSideSessionSanitizesLeakedToolScaffoldingWithoutBlankSeparator(): Promise<void> {
+	await withSideSessionRuntime({}, async (runtime) => {
+		const internal = runtime as unknown as {
+			streamingAssistant?: {
+				role: "assistant";
+				content: Array<{ type: string; text?: string }>;
+			};
+			getDisplayEntries(): ReturnType<JarvisSideSessionRuntime["getDisplayEntries"]>;
+		};
+
+		internal.streamingAssistant = {
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: [
+						"I'll check that now.",
+						"to=read",
+						'{"filePath":"README.md"}',
+						"The answer is available in README.md.",
+					].join("\n"),
+				},
+			],
+		};
+
+		const assistantEntry = internal.getDisplayEntries().find((entry) => entry.kind === "assistant");
+		assert.ok(assistantEntry, "assistant output should still render after sanitizing leaked tool routing without blank separators");
+		assert.ok(!assistantEntry!.text.includes("to=read"));
+		assert.ok(!assistantEntry!.text.includes("filePath"));
+		assert.ok(assistantEntry!.text.includes("The answer is available in README.md."), "sanitization should preserve normal prose that follows leaked tool arguments without a blank line");
 	});
 }
 
@@ -972,6 +1106,14 @@ async function testSideSessionUsesMainSystemPrompt(): Promise<void> {
 		assert.ok(
 			secondSystemPrompt.includes("It is enabled right now, but every actual send still requires explicit user confirmation."),
 			"/jarvis prompt should reflect enabled steer forwarding with confirmation gating",
+		);
+
+		currentMainContext = createMainContext("SECOND_MAIN_REQUEST", "third assistant status", "SECOND_RECENT_WINDOW");
+		const thirdResult = await extensionRunner.emitBeforeAgentStart("check assistant-only delta", undefined, "fallback prompt");
+		const thirdSystemPrompt = thirdResult?.systemPrompt ?? "";
+		assert.ok(
+			thirdSystemPrompt.includes("New assistant update: third assistant status"),
+			"/jarvis prompt should describe assistant-only main-session changes since the prior /jarvis turn",
 		);
 
 		runtime.dispose();
@@ -1236,13 +1378,14 @@ async function testBuildMainSessionContext(): Promise<void> {
 }
 
 async function testBuildMainSessionContextRecognizesPackDryRunValidation(): Promise<void> {
+	const activePackCommand = "npm pack --dry-run --json";
 	const activePackContext = buildMainSessionContext({
 		busyState: "busy",
 		hasPendingMessages: false,
 		modelLabel: "openai/gpt-5.2",
 		toolExecution: {
 			active: true,
-			running: [{ toolName: "bash", args: { command: "npm pack --dry-run" } }],
+			running: [{ toolName: "bash", args: { command: activePackCommand } }],
 		},
 		latestUserRequest: "Check the publish shape",
 		latestAssistantText: "Running package validation.",
@@ -1252,9 +1395,9 @@ async function testBuildMainSessionContextRecognizesPackDryRunValidation(): Prom
 	});
 
 	assert.equal(activePackContext.summary.workState.attentionMode, "validating");
-	assert.equal(activePackContext.summary.workState.currentAction, "running npm pack --dry-run");
+	assert.equal(activePackContext.summary.workState.currentAction, `running ${activePackCommand}`);
 	assert.equal(activePackContext.summary.validation.status, "running");
-	assert.equal(activePackContext.summary.validation.command, "npm pack --dry-run");
+	assert.equal(activePackContext.summary.validation.command, activePackCommand);
 
 	const completedPackContext = buildMainSessionContext({
 		busyState: "idle",
@@ -1273,7 +1416,7 @@ async function testBuildMainSessionContextRecognizesPackDryRunValidation(): Prom
 				timestamp: "2026-01-01T00:00:00.000Z",
 				message: {
 					role: "bashExecution",
-					command: "npm pack --dry-run",
+					command: activePackCommand,
 					output: "Tarball Contents",
 					exitCode: 0,
 					cancelled: false,
@@ -1285,8 +1428,165 @@ async function testBuildMainSessionContextRecognizesPackDryRunValidation(): Prom
 	});
 
 	assert.equal(completedPackContext.summary.validation.status, "passed");
-	assert.equal(completedPackContext.summary.validation.command, "npm pack --dry-run");
-	assert.equal(completedPackContext.summary.validation.summary, "npm pack --dry-run passed");
+	assert.equal(completedPackContext.summary.validation.command, activePackCommand);
+	assert.equal(completedPackContext.summary.validation.summary, `${activePackCommand} passed`);
+}
+
+async function testBuildMainSessionContextRecognizesValidationCommandVariants(): Promise<void> {
+	const activeValidationCommand = "cd packages/pi-jarvis && CI=1 npm test -- --runInBand";
+	const activeContext = buildMainSessionContext({
+		busyState: "busy",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: {
+			active: true,
+			running: [{ toolName: "bash", args: { command: activeValidationCommand } }],
+		},
+		latestUserRequest: "Run tests from the package subdir",
+		latestAssistantText: "Running validation.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [],
+	});
+	assert.equal(activeContext.summary.workState.attentionMode, "validating");
+	assert.equal(activeContext.summary.workState.currentAction, `running ${activeValidationCommand}`);
+	assert.equal(activeContext.summary.validation.status, "running");
+	assert.equal(activeContext.summary.validation.command, activeValidationCommand);
+
+	const passedValidationCommand = "env CI=1 npm run check -- --pretty false";
+	const passedContext = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: "Type-check with extra flags",
+		latestAssistantText: undefined,
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [
+			{
+				type: "message",
+				id: "passed-check",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: {
+					role: "bashExecution",
+					command: passedValidationCommand,
+					output: "0 errors",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 2,
+				},
+			} as any,
+		],
+	});
+	assert.equal(passedContext.summary.validation.status, "passed");
+	assert.equal(passedContext.summary.validation.command, passedValidationCommand);
+	assert.equal(passedContext.summary.validation.summary, `${passedValidationCommand} passed`);
+	assert.equal(passedContext.summary.workState.attentionMode, "waiting-for-user");
+
+	const failedValidationCommand = "NODE_OPTIONS=--max-old-space-size=4096 tsc --noEmit";
+	const failedContext = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: "Run strict type-check",
+		latestAssistantText: "Validation failed.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [
+			{
+				type: "message",
+				id: "failed-check",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:01.000Z",
+				message: {
+					role: "bashExecution",
+					command: failedValidationCommand,
+					output: "Type error",
+					exitCode: 2,
+					cancelled: false,
+					truncated: false,
+					timestamp: 3,
+				},
+			} as any,
+		],
+	});
+	assert.equal(failedContext.summary.validation.status, "failed");
+	assert.equal(failedContext.summary.validation.command, failedValidationCommand);
+	assert.equal(failedContext.summary.workState.attentionMode, "blocked");
+	assert.equal(failedContext.summary.workState.currentAction, `blocked on ${failedValidationCommand}`);
+
+	const completedNodeTestCommand = "node --import tsx test/jarvis.test.ts";
+	const completedNodeTestContext = buildMainSessionContext({
+		busyState: "idle",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: { active: false, running: [] },
+		latestUserRequest: "Run the core tests directly",
+		latestAssistantText: undefined,
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [
+			{
+				type: "message",
+				id: "node-test",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:02.000Z",
+				message: {
+					role: "bashExecution",
+					command: completedNodeTestCommand,
+					output: "jarvis tests passed",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 4,
+				},
+			} as any,
+		],
+	});
+	assert.equal(completedNodeTestContext.summary.validation.status, "passed");
+	assert.equal(completedNodeTestContext.summary.validation.command, completedNodeTestCommand);
+
+	const activeBuildPipelineCommand = "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json";
+	const buildPipelineContext = buildMainSessionContext({
+		busyState: "busy",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: {
+			active: true,
+			running: [{ toolName: "bash", args: { command: activeBuildPipelineCommand } }],
+		},
+		latestUserRequest: "Run build pipeline",
+		latestAssistantText: "Building.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [],
+	});
+	assert.equal(buildPipelineContext.summary.validation.status, "running");
+	assert.equal(buildPipelineContext.summary.validation.command, activeBuildPipelineCommand);
+
+	const activeReleaseVerificationCommand = "npm run verify:release";
+	const releaseVerificationContext = buildMainSessionContext({
+		busyState: "busy",
+		hasPendingMessages: false,
+		modelLabel: "openai/gpt-5.2",
+		toolExecution: {
+			active: true,
+			running: [{ toolName: "bash", args: { command: activeReleaseVerificationCommand } }],
+		},
+		latestUserRequest: "Verify release payload",
+		latestAssistantText: "Running release verification.",
+		systemPrompt: "main system prompt",
+		contextUsage: undefined,
+		branchEntries: [],
+	});
+	assert.equal(releaseVerificationContext.summary.workState.attentionMode, "validating");
+	assert.equal(releaseVerificationContext.summary.workState.currentAction, `running ${activeReleaseVerificationCommand}`);
+	assert.equal(releaseVerificationContext.summary.validation.status, "running");
+	assert.equal(releaseVerificationContext.summary.validation.command, activeReleaseVerificationCommand);
 }
 
 async function testBuildMainSessionContextPassedValidationWaitsForUserWithoutCompletionSignal(): Promise<void> {
@@ -1740,6 +2040,9 @@ async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
 		files?: string[];
 		exports?: Record<string, unknown>;
 		peerDependencies?: Record<string, string>;
+		pi?: {
+			extensions?: string[];
+		};
 	};
 
 	const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as PackageManifest;
@@ -1749,7 +2052,11 @@ async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
 	assert.equal(peerDependencies["@mariozechner/pi-tui"], "*", "package.json must declare @mariozechner/pi-tui as a peer dependency for published Pi packages");
 	assert.equal(packageJson.main, "./dist/index.js", "package.json must point main at the published dist entrypoint");
 	assert.equal(packageJson.types, "./dist/index.d.ts", "package.json must point types at the published dist declaration file");
-	assert.deepEqual(packageJson.files, ["dist", "README.md", "AGENTS.md", "LICENSE"], "package.json should publish the documented package surface");
+	const publishedFiles = new Set(packageJson.files ?? []);
+	for (const requiredPath of ["dist", "README.md", "AGENTS.md", "LICENSE"]) {
+		assert.ok(publishedFiles.has(requiredPath), `package.json files should include ${requiredPath}`);
+	}
+	assert.deepEqual(packageJson.pi?.extensions, ["./dist/index.js"], "package.json should expose the compiled extension entry under pi.extensions");
 	assert.equal((packageJson.exports?.["."] as { default?: string; types?: string } | undefined)?.default, "./dist/index.js");
 	assert.equal((packageJson.exports?.["."] as { default?: string; types?: string } | undefined)?.types, "./dist/index.d.ts");
 	assert.equal(packageJson.exports?.["./package.json"], "./package.json", "package.json should keep exporting its own manifest");
@@ -2054,6 +2361,21 @@ async function waitForAsyncWork(): Promise<void> {
 	await flushTicks();
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	await flushTicks();
+}
+
+function appendMainMessage(ctx: TestExtensionCommandContext, role: "user" | "assistant", text: string): void {
+	const id = `main-${ctx.branchEntries.length + 1}`;
+	ctx.branchEntries.push({
+		type: "message",
+		id,
+		parentId: ctx.branchEntries.at(-1)?.id ?? null,
+		timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, ctx.branchEntries.length)).toISOString(),
+		message: {
+			role,
+			content: [{ type: "text", text }],
+			timestamp: ctx.branchEntries.length,
+		},
+	} as SessionEntry);
 }
 
 async function withJarvisExtensionHarness(run: (harness: JarvisExtensionHarness) => Promise<void>): Promise<void> {
@@ -2453,26 +2775,119 @@ async function testQueuedJarvisSendRetriesAfterTransientFailure(): Promise<void>
 	});
 }
 
+async function testJarvisLocalSideCommandsDoNotAdvanceMainDeltaBaseline(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const overlayCapture = createOverlayCaptureHarness(harness);
+		try {
+			await openJarvisRuntime(harness);
+			await harness.api.runCommand("jarvis", "establish baseline", harness.ctx);
+			await waitForAsyncWork();
+			appendMainMessage(harness.ctx, "user", "NEW_MAIN_REQUEST_AFTER_BASELINE");
+
+			await harness.api.runCommand("jarvis", "/tree", harness.ctx);
+			await waitForAsyncWork();
+
+			const capturedOverlay = overlayCapture.getCapturedOverlay();
+			assert.ok(capturedOverlay, "should capture overlay component");
+			const lines = capturedOverlay.render(100) as string[];
+			assert.ok(
+				lines.some((line) => line.includes("Since last: request → NEW_MAIN_REQUEST_AFTER_BASELINE")),
+				"local /jarvis commands like /tree should not mark fresh main context as consumed by a /jarvis model turn",
+			);
+		} finally {
+			overlayCapture.restore();
+		}
+	});
+}
+
+async function testJarvisOverlayReportsAssistantOnlyMainDelta(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const overlayCapture = createOverlayCaptureHarness(harness);
+		try {
+			await openJarvisRuntime(harness);
+			await harness.api.runCommand("jarvis", "establish baseline", harness.ctx);
+			await waitForAsyncWork();
+			appendMainMessage(harness.ctx, "assistant", "Assistant-only main update");
+
+			await harness.api.runCommand("jarvis", "", harness.ctx);
+			await waitForAsyncWork();
+
+			const capturedOverlay = overlayCapture.getCapturedOverlay();
+			assert.ok(capturedOverlay, "should capture overlay component");
+			const lines = capturedOverlay.render(100) as string[];
+			assert.ok(
+				lines.some((line) => line.includes("Since last: assistant → Assistant-only main update")),
+				"overlay delta should report assistant-only main-session updates",
+			);
+		} finally {
+			overlayCapture.restore();
+		}
+	});
+}
+
 async function testJarvisOverlayToolToggleSyncsRuntime(): Promise<void> {
 	await withJarvisExtensionHarness(async (harness) => {
-		let capturedComponent: any;
-		const originalCustom = harness.ctx.ui.custom;
-		(harness.ctx.ui as any).custom = async (fn: any, opts: any) => {
-			capturedComponent = fn({ requestRender: () => {}, terminal: { rows: 40 } }, harness.ctx.ui.theme, {}, () => {});
-			return originalCustom.call(harness.ctx.ui, fn, opts);
-		};
+		const overlayCapture = createOverlayCaptureHarness(harness);
+		try {
+			const runtime = await openJarvisRuntime(harness);
+			const capturedOverlay = overlayCapture.getCapturedOverlay();
+			assert.ok(capturedOverlay, "should capture overlay component");
+			let lines = capturedOverlay.render(80) as string[];
+			assert.ok(lines.some((line) => line.includes("Since last: first /jarvis turn")), "overlay header should surface the since-last delta note");
+			assert.ok(lines.some((line) => line.includes("Access: repo tools off")), "overlay header should surface repo tool availability when tools are off");
 
-		const runtime = await openJarvisRuntime(harness);
-		assert.ok(capturedComponent, "should capture overlay component");
-		let lines = capturedComponent.render(80) as string[];
-		assert.ok(lines.some((line) => line.includes("Since last: first /jarvis turn")), "overlay header should surface the since-last delta note");
-		assert.ok(lines.some((line) => line.includes("Access: repo tools off")), "overlay header should surface repo tool availability when tools are off");
+			capturedOverlay.handleInput("\t");
+			capturedOverlay.handleInput(" " );
+			assert.deepEqual(runtime.toolAccessCalls, [true], "toggling Tools in the overlay should update the live /jarvis runtime");
+			lines = capturedOverlay.render(80) as string[];
+			assert.ok(lines.some((line) => line.includes("Access: local tools only")), "overlay header should surface repo tool availability when tools are enabled");
+		} finally {
+			overlayCapture.restore();
+		}
+	});
+}
 
-		capturedComponent.handleInput("\t");
-		capturedComponent.handleInput(" " );
-		assert.deepEqual(runtime.toolAccessCalls, [true], "toggling Tools in the overlay should update the live /jarvis runtime");
-		lines = capturedComponent.render(80) as string[];
-		assert.ok(lines.some((line) => line.includes("Access: local tools only")), "overlay header should surface repo tool availability when tools are enabled");
+async function testJarvisAccessControlsResetOnOverlayCloseAndNewSession(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const overlayCapture = createOverlayCaptureHarness(harness);
+		try {
+			const firstRuntime = await openJarvisRuntime(harness);
+			const capturedOverlay = overlayCapture.getCapturedOverlay();
+			assert.ok(capturedOverlay, "should capture overlay component");
+			capturedOverlay.focused = true;
+			capturedOverlay.handleInput("\t");
+			capturedOverlay.handleInput(" " );
+			capturedOverlay.handleInput("\t");
+			capturedOverlay.handleInput(" " );
+			capturedOverlay.handleInput("\t");
+			capturedOverlay.handleInput(" " );
+			let lines = capturedOverlay.render(80) as string[];
+			assert.ok(lines.some((line) => line.includes("Repo tools: on")));
+			assert.ok(lines.some((line) => line.includes("Note main: on")));
+			assert.ok(lines.some((line) => line.includes("Redirect: on")));
+
+			capturedOverlay.handleInput("\x1b");
+			assert.equal(firstRuntime.toolAccessEnabled, false, "closing the overlay should disable repo tools in the live runtime");
+
+			await harness.api.runCommand("jarvis", "", harness.ctx);
+			await waitForAsyncWork();
+			lines = capturedOverlay.render(80) as string[];
+			assert.ok(lines.some((line) => line.includes("Repo tools: off")), "repo tools should be off when /jarvis is reopened");
+			assert.ok(lines.some((line) => line.includes("Note main: off")), "Note main should be off when /jarvis is reopened");
+			assert.ok(lines.some((line) => line.includes("Redirect: off")), "Redirect should be off when /jarvis is reopened");
+
+			capturedOverlay.focused = true;
+			capturedOverlay.handleInput("\t");
+			capturedOverlay.handleInput(" " );
+			await harness.api.runCommand("jarvis", "/new", harness.ctx);
+			await waitForAsyncWork();
+			const nextRuntime = harness.getRuntime();
+			assert.ok(nextRuntime);
+			assert.notEqual(nextRuntime, firstRuntime);
+			assert.equal(nextRuntime!.toolAccessEnabled, false, "/new should start with repo tools disabled");
+		} finally {
+			overlayCapture.restore();
+		}
 	});
 }
 
@@ -2486,12 +2901,7 @@ async function testJarvisOverlaySkipsReconnectTextForMissingSessionRef(): Promis
 		} as any);
 		await harness.api.emit("session_start", {}, harness.ctx);
 
-		let capturedComponent: any;
-		const originalCustom = harness.ctx.ui.custom;
-		(harness.ctx.ui as any).custom = async (fn: any, opts: any) => {
-			capturedComponent = fn({ requestRender: () => {}, terminal: { rows: 40 } }, harness.ctx.ui.theme, {}, () => {});
-			return originalCustom.call(harness.ctx.ui, fn, opts);
-		};
+		const overlayCapture = createOverlayCaptureHarness(harness);
 
 		const previousCreate = JarvisSideSessionRuntime.create;
 		let pendingRuntime: FakeJarvisRuntime | undefined;
@@ -2505,11 +2915,13 @@ async function testJarvisOverlaySkipsReconnectTextForMissingSessionRef(): Promis
 
 		try {
 			await harness.api.runCommand("jarvis", "", harness.ctx);
-			assert.ok(capturedComponent, "should capture the overlay while the runtime is still booting");
-			const lines = capturedComponent.render(80) as string[];
+			const capturedOverlay = overlayCapture.getCapturedOverlay();
+			assert.ok(capturedOverlay, "should capture the overlay while the runtime is still booting");
+			const lines = capturedOverlay.render(80) as string[];
 			assert.ok(lines.some((line) => line.includes("Starting /jarvis side conversation…")), "missing side-session files should fall back to a fresh startup label");
 			assert.ok(!lines.some((line) => line.includes("Connecting to your prior /jarvis conversation…")), "missing side-session files should not claim the old conversation will be restored");
 		} finally {
+			overlayCapture.restore();
 			(JarvisSideSessionRuntime as { create: typeof JarvisSideSessionRuntime.create }).create = previousCreate;
 			if (pendingRuntime && resolveCreate) {
 				resolveCreate(pendingRuntime as unknown as JarvisSideSessionRuntime);
@@ -2577,42 +2989,41 @@ async function testJarvisBootInvalidatedBySessionRestartDoesNotReuseStaleRuntime
 
 async function testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning(): Promise<void> {
 	await withJarvisExtensionHarness(async (harness) => {
-		let capturedComponent: any;
-		const originalCustom = harness.ctx.ui.custom;
-		(harness.ctx.ui as any).custom = async (fn: any, opts: any) => {
-			capturedComponent = fn({ requestRender: () => {}, terminal: { rows: 40 } }, harness.ctx.ui.theme, {}, () => {});
-			return originalCustom.call(harness.ctx.ui, fn, opts);
-		};
+		const overlayCapture = createOverlayCaptureHarness(harness);
+		try {
+			const runtime = await openJarvisRuntime(harness);
+			await waitForAsyncWork();
 
-		const runtime = await openJarvisRuntime(harness);
-		await waitForAsyncWork();
+			const capturedOverlay = overlayCapture.getCapturedOverlay();
+			assert.ok(capturedOverlay, "should capture overlay component");
 
-		assert.ok(capturedComponent, "should capture overlay component");
+			// It's a JarvisOverlayComponent. Its `view` property is private, but we can still move focus to Share and toggle it.
+			// The default focus is "input".
+			capturedOverlay.handleInput("\t"); // focus Tools
+			capturedOverlay.handleInput("\t"); // focus Share
+			capturedOverlay.handleInput(" " );
 
-		// It's a JarvisOverlayComponent. Its `view` property is private, but we can still move focus to Share and toggle it.
-		// The default focus is "input".
-		capturedComponent.handleInput("\t"); // focus Tools
-		capturedComponent.handleInput("\t"); // focus Share
-		capturedComponent.handleInput(" " );
+			// Now switch model to incompatible
+			harness.ctx.model = harness.ctx.modelRegistry.find("xai", "grok-incompatible-multi-agent");
+			await harness.api.emit("model_select", { model: harness.ctx.model }, harness.ctx);
 
-		// Now switch model to incompatible
-		harness.ctx.model = harness.ctx.modelRegistry.find("xai", "grok-incompatible-multi-agent");
-		await harness.api.emit("model_select", { model: harness.ctx.model }, harness.ctx);
-
-		const lines = capturedComponent.render(80) as string[];
-		assert.ok(
-			lines.some((line) => line.includes("Relay disabled:")),
-			"/jarvis should notify when an incompatible main model disables the bridge tools",
-		);
-		assert.ok(
-			lines.some((line) => line.includes("Disabled Follow-up/Steer:")),
-			"/jarvis should use polished Follow-up casing in compatibility warnings",
-		);
-		assert.deepEqual(
-			runtime.toolAccessCalls,
-			[false, false],
-			"/jarvis should refresh the live runtime tool set after compatibility changes revoke bridge permissions",
-		);
+			const lines = capturedOverlay.render(80) as string[];
+			assert.ok(
+				lines.some((line) => line.includes("Relay disabled:")),
+				"/jarvis should notify when an incompatible main model disables the bridge tools",
+			);
+			assert.ok(
+				lines.some((line) => line.includes("Disabled Follow-up/Steer:")),
+				"/jarvis should use polished Follow-up casing in compatibility warnings",
+			);
+			assert.deepEqual(
+				runtime.toolAccessCalls,
+				[false, false],
+				"/jarvis should refresh the live runtime tool set after compatibility changes revoke bridge permissions",
+			);
+		} finally {
+			overlayCapture.restore();
+		}
 	});
 }
 
@@ -2794,6 +3205,94 @@ async function testJarvisClearGlobalSettingFallsBackToDefault(): Promise<void> {
 			runtime.currentModel?.id,
 			harness.mainModel.id,
 			"clearing the global /jarvis setting without a project override should fall back to follow-main",
+		);
+	});
+}
+
+async function testJarvisModelCommandRepairsMalformedTargetConfig(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const projectPath = getJarvisConfigPath(harness.ctx.cwd, "project");
+		mkdirSync(dirname(projectPath), { recursive: true });
+		writeFileSync(projectPath, "{ invalid json\n", "utf8");
+
+		await harness.api.runCommand("jarvis-model", "side-beta", harness.ctx);
+
+		assert.deepEqual(
+			loadJarvisModelSelectionSetting(harness.ctx.cwd, "project"),
+			{ mode: "pinned", provider: harness.pinnedModel.provider, modelId: harness.pinnedModel.id },
+			"/jarvis-model should overwrite and repair a malformed target config",
+		);
+		assert.ok(
+			harness.ctx.notifications.some((notification) => notification.message.includes(`Pinned /jarvis to ${harness.pinnedModel.provider}/${harness.pinnedModel.id}`)),
+			"successful repair should be reported as a normal pin",
+		);
+	});
+}
+
+async function testJarvisThinkingCommandRepairsMalformedTargetConfig(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		const projectPath = getJarvisConfigPath(harness.ctx.cwd, "project");
+		mkdirSync(dirname(projectPath), { recursive: true });
+		writeFileSync(projectPath, "{ invalid json\n", "utf8");
+
+		await harness.api.runCommand("jarvis-thinking", "low", harness.ctx);
+
+		assert.deepEqual(
+			loadJarvisThinkingSelectionSetting(harness.ctx.cwd, "project"),
+			{ mode: "pinned", thinkingLevel: "low" },
+			"/jarvis-thinking should overwrite and repair a malformed target config",
+		);
+		assert.ok(
+			harness.ctx.notifications.some((notification) => notification.message.includes("Set /jarvis thinking to low")),
+			"successful repair should be reported as a normal thinking change",
+		);
+	});
+}
+
+async function testJarvisClearProjectModelIgnoresMalformedGlobalFallback(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisModelSelectionSetting(harness.ctx.cwd, "project", {
+			mode: "pinned",
+			provider: harness.nextMainModel.provider,
+			modelId: harness.nextMainModel.id,
+		});
+		const globalPath = getJarvisConfigPath(harness.ctx.cwd, "global");
+		mkdirSync(dirname(globalPath), { recursive: true });
+		writeFileSync(globalPath, "{ invalid json\n", "utf8");
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.currentModel?.id, harness.nextMainModel.id);
+
+		await harness.api.runCommand("jarvis-model", "clear --project", harness.ctx);
+
+		assert.equal(loadJarvisModelSelectionSetting(harness.ctx.cwd, "project"), undefined);
+		assert.equal(runtime.currentModel?.id, harness.mainModel.id, "malformed fallback scope should not block clearing the requested model setting");
+		assert.ok(
+			harness.ctx.notifications.some((notification) => notification.type === "warning" && notification.message.includes("malformed global /jarvis model setting")),
+			"clearing with a malformed fallback scope should warn without failing",
+		);
+	});
+}
+
+async function testJarvisClearProjectThinkingIgnoresMalformedGlobalFallback(): Promise<void> {
+	await withJarvisExtensionHarness(async (harness) => {
+		saveJarvisThinkingSelectionSetting(harness.ctx.cwd, "project", { mode: "pinned", thinkingLevel: "high" });
+		const globalPath = getJarvisConfigPath(harness.ctx.cwd, "global");
+		mkdirSync(dirname(globalPath), { recursive: true });
+		writeFileSync(globalPath, "{ invalid json\n", "utf8");
+
+		await harness.api.emit("session_start", {}, harness.ctx);
+		const runtime = await openJarvisRuntime(harness);
+		assert.equal(runtime.initialThinkingLevel, "high");
+
+		await harness.api.runCommand("jarvis-thinking", "clear --project", harness.ctx);
+
+		assert.equal(loadJarvisThinkingSelectionSetting(harness.ctx.cwd, "project"), undefined);
+		assert.deepEqual(runtime.syncModelCalls.at(-1), { model: harness.mainModel, thinkingLevel: "high" }, "malformed fallback scope should not block clearing the requested thinking setting");
+		assert.ok(
+			harness.ctx.notifications.some((notification) => notification.type === "warning" && notification.message.includes("malformed global /jarvis thinking setting")),
+			"clearing thinking with a malformed fallback scope should warn without failing",
 		);
 	});
 }
@@ -3237,6 +3736,7 @@ async function testOverlayShortHeightKeepsConfirmationVisible(): Promise<void> {
 	);
 
 	const lines = overlay.render(80);
+	assert.ok(lines.length <= Math.floor(terminal.rows * 0.78), "short-terminal overlay output should fit within the host overlay clipping height");
 	assert.ok(lines.some((line) => line.includes("Send /jarvis steer to main?")));
 	assert.ok(lines.some((line) => line.includes("focus on edge cases")));
 	assert.ok(lines.some((line) => line.includes("Press Y to confirm, N or Esc to cancel.")));
@@ -3393,82 +3893,116 @@ async function testMainSessionTrackerAnonymousSameNameToolExecutionsDoNotCollaps
 	tracker.handleToolExecutionEnd({ toolName: "read" });
 	assert.equal(tracker.snapshot().toolExecution.running.length, 0);
 }
+type RegisteredTestCase = readonly [name: string, run: () => Promise<void>];
+
+const REGISTERED_TESTS: readonly RegisteredTestCase[] = [
+	["testSessionRef", testSessionRef],
+	["testSessionRefDoesNotFallbackPastMalformedNewestEntry", testSessionRefDoesNotFallbackPastMalformedNewestEntry],
+	["testJarvisModelConfigRoundTrip", testJarvisModelConfigRoundTrip],
+	["testJarvisThinkingConfigRoundTrip", testJarvisThinkingConfigRoundTrip],
+	["testMalformedProjectJarvisModelConfigCanBeCleared", testMalformedProjectJarvisModelConfigCanBeCleared],
+	["testMalformedGlobalJarvisModelConfigCanBeCleared", testMalformedGlobalJarvisModelConfigCanBeCleared],
+	["testMalformedJarvisConfigCanBeRepairedBySavingSetting", testMalformedJarvisConfigCanBeRepairedBySavingSetting],
+	["testJarvisSessionDirectoryAvoidsWorkspacePathCollisions", testJarvisSessionDirectoryAvoidsWorkspacePathCollisions],
+	["testOverlayFocusAndEscRouting", testOverlayFocusAndEscRouting],
+	["testOverlayRenderDistinctness", testOverlayRenderDistinctness],
+	["testOverlayAnimatedThinkingFallback", testOverlayAnimatedThinkingFallback],
+	["testOverlayClippedTranscriptPreservesSpeakerLabel", testOverlayClippedTranscriptPreservesSpeakerLabel],
+	["testOverlaySanitizesDisplayControlSequences", testOverlaySanitizesDisplayControlSequences],
+	["testOverlaySanitizesNonTranscriptUiText", testOverlaySanitizesNonTranscriptUiText],
+	["testOverlaySanitizesWorkingMessageText", testOverlaySanitizesWorkingMessageText],
+	["testOverlayForwardingToggleControls", testOverlayForwardingToggleControls],
+	["testOverlayInputSwallowedOnToggleFocus", testOverlayInputSwallowedOnToggleFocus],
+	["testJarvisOverlayInputHistoryNavigatesUserMessages", testJarvisOverlayInputHistoryNavigatesUserMessages],
+	["testBridgeConfirmationPrimitive", testBridgeConfirmationPrimitive],
+	["testOverlayConfirmationRenderingAndKeys", testOverlayConfirmationRenderingAndKeys],
+	["testOverlayShortHeightKeepsConfirmationVisible", testOverlayShortHeightKeepsConfirmationVisible],
+	["testHandleMessageStartMarksAssistantStreaming", testHandleMessageStartMarksAssistantStreaming],
+	["testMainSessionTrackerRefreshSkipsPreCompactionMessages", testMainSessionTrackerRefreshSkipsPreCompactionMessages],
+	["testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText", testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText],
+	["testBuildMainSessionContextIncludesPlainStringAssistantContentInRecentWindow", testBuildMainSessionContextIncludesPlainStringAssistantContentInRecentWindow],
+	["testMainSessionTrackerToolExecutionKeying", testMainSessionTrackerToolExecutionKeying],
+	["testMainSessionTrackerAnonymousSameNameToolExecutionsDoNotCollapse", testMainSessionTrackerAnonymousSameNameToolExecutionsDoNotCollapse],
+	["testJarvisModelDefaultFollowMainBehavior", testJarvisModelDefaultFollowMainBehavior],
+	["testXaiFollowMainForcesThinkingOff", testXaiFollowMainForcesThinkingOff],
+	["testJarvisModelOpensModelMenuWhenNoArgs", testJarvisModelOpensModelMenuWhenNoArgs],
+	["testJarvisModelOverrideAndStateSeparation", testJarvisModelOverrideAndStateSeparation],
+	["testPinnedJarvisModelNotClobberedByMainModelSelect", testPinnedJarvisModelNotClobberedByMainModelSelect],
+	["testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime", testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime],
+	["testQueuedJarvisSendUsesDesiredThinkingLevel", testQueuedJarvisSendUsesDesiredThinkingLevel],
+	["testJarvisThinkingCommandPinsProjectThinkingLevel", testJarvisThinkingCommandPinsProjectThinkingLevel],
+	["testJarvisThinkingFollowMainSyncsPinnedModelRuntime", testJarvisThinkingFollowMainSyncsPinnedModelRuntime],
+	["testJarvisThinkingProjectSettingOverridesGlobalSetting", testJarvisThinkingProjectSettingOverridesGlobalSetting],
+	["testJarvisThinkingClearProjectFallsBackToGlobal", testJarvisThinkingClearProjectFallsBackToGlobal],
+	["testXaiJarvisModelForcesExplicitThinkingOff", testXaiJarvisModelForcesExplicitThinkingOff],
+	["testJarvisCompactCommandRunsInsideSideSession", testJarvisCompactCommandRunsInsideSideSession],
+	["testJarvisTreeCommandListsAndNavigatesSideSessionTree", testJarvisTreeCommandListsAndNavigatesSideSessionTree],
+	["testJarvisNewCommandStartsFreshSideSession", testJarvisNewCommandStartsFreshSideSession],
+	["testQueuedJarvisSendRetriesAfterTransientFailure", testQueuedJarvisSendRetriesAfterTransientFailure],
+	["testJarvisLocalSideCommandsDoNotAdvanceMainDeltaBaseline", testJarvisLocalSideCommandsDoNotAdvanceMainDeltaBaseline],
+	["testJarvisOverlayReportsAssistantOnlyMainDelta", testJarvisOverlayReportsAssistantOnlyMainDelta],
+	["testJarvisOverlayToolToggleSyncsRuntime", testJarvisOverlayToolToggleSyncsRuntime],
+	["testJarvisAccessControlsResetOnOverlayCloseAndNewSession", testJarvisAccessControlsResetOnOverlayCloseAndNewSession],
+	["testJarvisOverlaySkipsReconnectTextForMissingSessionRef", testJarvisOverlaySkipsReconnectTextForMissingSessionRef],
+	["testJarvisBootInvalidatedBySessionRestartDoesNotReuseStaleRuntime", testJarvisBootInvalidatedBySessionRestartDoesNotReuseStaleRuntime],
+	["testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning", testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning],
+	["testJarvisModelReturnToFollowMainBehavior", testJarvisModelReturnToFollowMainBehavior],
+	["testJarvisModelDefaultScopeWritesProjectConfig", testJarvisModelDefaultScopeWritesProjectConfig],
+	["testJarvisGlobalSettingAppliesWithoutProjectOverride", testJarvisGlobalSettingAppliesWithoutProjectOverride],
+	["testUnavailableProjectJarvisModelFallsBackToValidGlobalSetting", testUnavailableProjectJarvisModelFallsBackToValidGlobalSetting],
+	["testJarvisProjectSettingOverridesGlobalSetting", testJarvisProjectSettingOverridesGlobalSetting],
+	["testJarvisClearProjectSettingFallsBackToGlobal", testJarvisClearProjectSettingFallsBackToGlobal],
+	["testJarvisClearGlobalSettingFallsBackToDefault", testJarvisClearGlobalSettingFallsBackToDefault],
+	["testJarvisModelCommandRepairsMalformedTargetConfig", testJarvisModelCommandRepairsMalformedTargetConfig],
+	["testJarvisThinkingCommandRepairsMalformedTargetConfig", testJarvisThinkingCommandRepairsMalformedTargetConfig],
+	["testJarvisClearProjectModelIgnoresMalformedGlobalFallback", testJarvisClearProjectModelIgnoresMalformedGlobalFallback],
+	["testJarvisClearProjectThinkingIgnoresMalformedGlobalFallback", testJarvisClearProjectThinkingIgnoresMalformedGlobalFallback],
+	["testMalformedProjectJarvisModelSettingFallsBackToValidGlobalOnStartup", testMalformedProjectJarvisModelSettingFallsBackToValidGlobalOnStartup],
+	["testMalformedGlobalJarvisModelSettingFallsBackToValidProjectOnStartup", testMalformedGlobalJarvisModelSettingFallsBackToValidProjectOnStartup],
+	["testSideSessionPersistence", testSideSessionPersistence],
+	["testSideSessionFreshWelcomeMessage", testSideSessionFreshWelcomeMessage],
+	["testSideSessionKeepsPendingUserPromptAndShowsThinking", testSideSessionKeepsPendingUserPromptAndShowsThinking],
+	["testSideSessionSanitizesLeakedToolScaffolding", testSideSessionSanitizesLeakedToolScaffolding],
+	["testSideSessionSanitizesMultilineLeakedToolScaffolding", testSideSessionSanitizesMultilineLeakedToolScaffolding],
+	["testSideSessionSanitizesLeakedToolScaffoldingWithoutBlankSeparator", testSideSessionSanitizesLeakedToolScaffoldingWithoutBlankSeparator],
+	["testSideSessionPreservesLegitimateJsonContent", testSideSessionPreservesLegitimateJsonContent],
+	["testSideSessionUsesMainSystemPrompt", testSideSessionUsesMainSystemPrompt],
+	["testBuildMainSessionContext", testBuildMainSessionContext],
+	["testBuildMainSessionContextRecognizesPackDryRunValidation", testBuildMainSessionContextRecognizesPackDryRunValidation],
+	["testBuildMainSessionContextRecognizesValidationCommandVariants", testBuildMainSessionContextRecognizesValidationCommandVariants],
+	["testBuildMainSessionContextIdleStateClassification", testBuildMainSessionContextIdleStateClassification],
+	["testBuildMainSessionContextPassedValidationWaitsForUserWithoutCompletionSignal", testBuildMainSessionContextPassedValidationWaitsForUserWithoutCompletionSignal],
+	["testSideSessionToolWhitelist", testSideSessionToolWhitelist],
+	["testSideSessionLocalToolsActivateWhenPermitted", testSideSessionLocalToolsActivateWhenPermitted],
+	["testSideSessionLocalToolsReportMcpUnavailableWhenAdapterMissing", testSideSessionLocalToolsReportMcpUnavailableWhenAdapterMissing],
+	["testSideSessionLocalToolsDoNotClaimMcpForArbitraryExtensionPath", testSideSessionLocalToolsDoNotClaimMcpForArbitraryExtensionPath],
+	["testSideSessionBridgeToolsActivateWhenPermitted", testSideSessionBridgeToolsActivateWhenPermitted],
+	["testFollowUpToolPermissionGating", testFollowUpToolPermissionGating],
+	["testSteerToolPermissionAndConfirmGating", testSteerToolPermissionAndConfirmGating],
+	["testSteerConfirmationRoutedThroughBridge", testSteerConfirmationRoutedThroughBridge],
+	["testPackageManifestDeclaresPiPeerDependencies", testPackageManifestDeclaresPiPeerDependencies],
+	["testGitIgnoreCoversProjectPiArtifacts", testGitIgnoreCoversProjectPiArtifacts],
+];
+
+function assertTestRegistryCoverage(): void {
+	const source = readFileSync(new URL("./jarvis.test.ts", import.meta.url), "utf8");
+	const declaredTests = [...source.matchAll(/^async function (test[A-Za-z0-9_]+)\(/gm)].map((match) => match[1]).sort();
+	const registeredTests = REGISTERED_TESTS.map(([name]) => name).sort();
+	const missingFromRegistry = declaredTests.filter((name) => !registeredTests.includes(name));
+	const staleRegistryEntries = registeredTests.filter((name) => !declaredTests.includes(name));
+	assert.deepEqual(missingFromRegistry, [], `unregistered tests in runner: ${missingFromRegistry.join(", ") || "none"}`);
+	assert.deepEqual(staleRegistryEntries, [], `stale runner entries with no matching test: ${staleRegistryEntries.join(", ") || "none"}`);
+}
+
 async function main(): Promise<void> {
-	await testSessionRef();
-	await testSessionRefDoesNotFallbackPastMalformedNewestEntry();
-	await testJarvisModelConfigRoundTrip();
-	await testJarvisThinkingConfigRoundTrip();
-	await testMalformedProjectJarvisModelConfigCanBeCleared();
-	await testMalformedGlobalJarvisModelConfigCanBeCleared();
-	await testOverlayFocusAndEscRouting();
-	await testOverlayRenderDistinctness();
-	await testOverlayAnimatedThinkingFallback();
-	await testOverlayClippedTranscriptPreservesSpeakerLabel();
-	await testOverlaySanitizesDisplayControlSequences();
-	await testOverlaySanitizesNonTranscriptUiText();
-	await testOverlaySanitizesWorkingMessageText();
-	await testOverlayForwardingToggleControls();
-	await testOverlayInputSwallowedOnToggleFocus();
-	await testJarvisOverlayInputHistoryNavigatesUserMessages();
-	await testBridgeConfirmationPrimitive();
-	await testOverlayConfirmationRenderingAndKeys();
-	await testOverlayShortHeightKeepsConfirmationVisible();
-	await testHandleMessageStartMarksAssistantStreaming();
-	await testMainSessionTrackerRefreshSkipsPreCompactionMessages();
-	await testToolOnlyAssistantTurnDoesNotReuseOlderAssistantText();
-	await testBuildMainSessionContextIncludesPlainStringAssistantContentInRecentWindow();
-	await testMainSessionTrackerToolExecutionKeying();
-	await testMainSessionTrackerAnonymousSameNameToolExecutionsDoNotCollapse();
-	await testJarvisModelDefaultFollowMainBehavior();
-	await testXaiFollowMainForcesThinkingOff();
-	await testJarvisModelOpensModelMenuWhenNoArgs();
-	await testJarvisModelOverrideAndStateSeparation();
-	await testPinnedJarvisModelNotClobberedByMainModelSelect();
-	await testJarvisPinnedModelResetsThinkingLevelToOffForLiveRuntime();
-	await testQueuedJarvisSendUsesDesiredThinkingLevel();
-	await testJarvisThinkingCommandPinsProjectThinkingLevel();
-	await testJarvisThinkingFollowMainSyncsPinnedModelRuntime();
-	await testJarvisThinkingProjectSettingOverridesGlobalSetting();
-	await testJarvisThinkingClearProjectFallsBackToGlobal();
-	await testXaiJarvisModelForcesExplicitThinkingOff();
-	await testJarvisCompactCommandRunsInsideSideSession();
-	await testJarvisTreeCommandListsAndNavigatesSideSessionTree();
-	await testJarvisNewCommandStartsFreshSideSession();
-	await testQueuedJarvisSendRetriesAfterTransientFailure();
-	await testJarvisOverlayToolToggleSyncsRuntime();
-	await testJarvisOverlaySkipsReconnectTextForMissingSessionRef();
-	await testJarvisBootInvalidatedBySessionRestartDoesNotReuseStaleRuntime();
-	await testJarvisModelIncompatibleGuardBlocksTogglesAndShowsWarning();
-	await testJarvisModelReturnToFollowMainBehavior();
-	await testJarvisModelDefaultScopeWritesProjectConfig();
-	await testJarvisGlobalSettingAppliesWithoutProjectOverride();
-	await testUnavailableProjectJarvisModelFallsBackToValidGlobalSetting();
-	await testJarvisProjectSettingOverridesGlobalSetting();
-	await testJarvisClearProjectSettingFallsBackToGlobal();
-	await testJarvisClearGlobalSettingFallsBackToDefault();
-	await testMalformedProjectJarvisModelSettingFallsBackToValidGlobalOnStartup();
-	await testMalformedGlobalJarvisModelSettingFallsBackToValidProjectOnStartup();
-	await testSideSessionPersistence();
-	await testSideSessionFreshWelcomeMessage();
-	await testSideSessionKeepsPendingUserPromptAndShowsThinking();
-	await testSideSessionSanitizesLeakedToolScaffolding();
-	await testSideSessionSanitizesMultilineLeakedToolScaffolding();
-	await testSideSessionPreservesLegitimateJsonContent();
-	await testSideSessionUsesMainSystemPrompt();
-	await testBuildMainSessionContext();
-	await testBuildMainSessionContextRecognizesPackDryRunValidation();
-	await testBuildMainSessionContextIdleStateClassification();
-	await testBuildMainSessionContextPassedValidationWaitsForUserWithoutCompletionSignal();
-	await testSideSessionToolWhitelist();
-	await testSideSessionLocalToolsActivateWhenPermitted();
-	await testSideSessionLocalToolsReportMcpUnavailableWhenAdapterMissing();
-	await testSideSessionLocalToolsDoNotClaimMcpForArbitraryExtensionPath();
-	await testSideSessionBridgeToolsActivateWhenPermitted();
-	await testFollowUpToolPermissionGating();
-	await testSteerToolPermissionAndConfirmGating();
-	await testSteerConfirmationRoutedThroughBridge();
-	await testPackageManifestDeclaresPiPeerDependencies();
-	await testGitIgnoreCoversProjectPiArtifacts();
+	assertTestRegistryCoverage();
+	for (const [name, run] of REGISTERED_TESTS) {
+		try {
+			await run();
+		} catch (error) {
+			throw new Error(`test failed: ${name}`, { cause: error });
+		}
+	}
 	console.log("jarvis tests passed");
 }
 

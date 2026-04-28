@@ -145,6 +145,7 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 				(tui, theme, _keybindings, done) => {
 					state.themeProvider = () => theme;
 					const closeOverlay = () => {
+						resetTransientAccessControls(state);
 						done(undefined);
 						queueMicrotask(() => tui.requestRender());
 					};
@@ -224,8 +225,8 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 			const clearScopedSelection = async (): Promise<ResolvedJarvisModelSelection> => {
 				const previousSelection = state.jarvisModelSelection;
 				const previousSource = state.jarvisModelSelectionSource;
-				const projectSelection = scope === "project" ? undefined : loadJarvisModelSelectionSetting(ctx.cwd, "project");
-				const globalSelection = scope === "global" ? undefined : loadJarvisModelSelectionSetting(ctx.cwd, "global");
+				const projectSelection = scope === "project" ? undefined : loadJarvisModelSelectionForClear(ctx.cwd, "project", ctx);
+				const globalSelection = scope === "global" ? undefined : loadJarvisModelSelectionForClear(ctx.cwd, "global", ctx);
 				const resolvedSelection = resolveJarvisModelSelectionFromSettings(projectSelection, globalSelection, ctx.modelRegistry);
 				await applyJarvisModelSelection(state, resolvedSelection.selection);
 				try {
@@ -373,8 +374,8 @@ export default function jarvisExtension(pi: ExtensionAPI): void {
 			const clearScopedSelection = async (): Promise<ResolvedJarvisThinkingSelection> => {
 				const previousSelection = state.jarvisThinkingSelection;
 				const previousSource = state.jarvisThinkingSelectionSource;
-				const projectSelection = scope === "project" ? undefined : loadJarvisThinkingSelectionSetting(ctx.cwd, "project");
-				const globalSelection = scope === "global" ? undefined : loadJarvisThinkingSelectionSetting(ctx.cwd, "global");
+				const projectSelection = scope === "project" ? undefined : loadJarvisThinkingSelectionForClear(ctx.cwd, "project", ctx);
+				const globalSelection = scope === "global" ? undefined : loadJarvisThinkingSelectionForClear(ctx.cwd, "global", ctx);
 				const resolvedSelection = resolveJarvisThinkingSelectionFromSettings(projectSelection, globalSelection);
 				await applyJarvisThinkingSelection(state, resolvedSelection.selection);
 				try {
@@ -574,6 +575,13 @@ function updateContextState(pi: ExtensionAPI, state: MainState, ctx: ExtensionCo
 
 function refreshMainContext(state: MainState): void {
 	state.mainContext = buildMainSessionContext(state.mainSession.snapshot());
+}
+
+function resetTransientAccessControls(state: MainState): void {
+	state.allowSideTools = false;
+	state.allowFollowUpToMain = false;
+	state.allowSteerToMain = false;
+	state.runtime?.setToolAccessEnabled(false);
 }
 
 function getDesiredJarvisModel(state: MainState): Model<any> | undefined {
@@ -786,6 +794,31 @@ function resolveConfiguredJarvisThinkingSelection(
 	return resolveJarvisThinkingSelectionFromSettings(projectSelection, globalSelection);
 }
 
+function loadJarvisModelSelectionForClear(
+	cwd: string,
+	scope: JarvisModelSelectionScope,
+	ctx: ExtensionCommandContext,
+): StoredJarvisModelSelection | undefined {
+	try {
+		return loadJarvisModelSelectionSetting(cwd, scope);
+	} catch (error) {
+		ctx.ui.notify(`Ignoring malformed ${scope} /jarvis model setting while clearing the requested scope: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		return undefined;
+	}
+}
+
+function loadJarvisThinkingSelectionForClear(
+	cwd: string,
+	scope: JarvisModelSelectionScope,
+	ctx: ExtensionCommandContext,
+): StoredJarvisThinkingSelection | undefined {
+	try {
+		return loadJarvisThinkingSelectionSetting(cwd, scope);
+	} catch (error) {
+		ctx.ui.notify(`Ignoring malformed ${scope} /jarvis thinking setting while clearing the requested scope: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		return undefined;
+	}
+}
 
 function isModelBridgeCompatible(model: Model<any> | undefined): boolean {
 	if (!model) {
@@ -942,6 +975,7 @@ async function executeJarvisSideCommand(
 	state.bootPromise = undefined;
 	state.flushPromise = undefined;
 	state.lastJarvisSeenMainContext = undefined;
+	resetTransientAccessControls(state);
 	const sessionFile = await createSideSessionFile(ctx.cwd);
 	const sessionRef = createJarvisSessionRef(sessionFile);
 	state.sessionRef = sessionRef;
@@ -1095,6 +1129,9 @@ function formatMainContextDeltaLabel(
 	if (currentContext.summary.latestUserRequest && currentContext.summary.latestUserRequest !== previousContext.summary.latestUserRequest) {
 		return `request → ${currentContext.summary.latestUserRequest}`;
 	}
+	if (currentContext.summary.latestAssistantText && currentContext.summary.latestAssistantText !== previousContext.summary.latestAssistantText) {
+		return `assistant → ${currentContext.summary.latestAssistantText}`;
+	}
 	return "no significant change";
 }
 
@@ -1123,9 +1160,9 @@ async function flushQueuedMessages(pi: ExtensionAPI, state: MainState, ctx: Exte
 						runtime = await executeJarvisSideCommand(pi, state, ctx, runtime, command);
 					} else {
 						await runtime.sendMessage(message);
+						state.lastJarvisSeenMainContext = state.mainContext;
 					}
 					state.queuedMessages.shift();
-					state.lastJarvisSeenMainContext = state.mainContext;
 				} catch (error) {
 					const action = command ? `run ${message.split(/\s+/, 1)[0]}` : "send /jarvis message";
 					state.bridge.notify(`Failed to ${action}: ${error instanceof Error ? error.message : String(error)}`, "error");

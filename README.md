@@ -13,6 +13,8 @@
 [![Pi extension](https://img.shields.io/badge/Pi-extension-06b6d4?style=for-the-badge)](https://github.com/fluxgear/pi-jarvis)
 [![TypeScript](https://img.shields.io/badge/TypeScript-powered-2563eb?style=for-the-badge)](./package.json)
 
+<p><strong>Current version:</strong> 1.3.1</p>
+
 <p>
   <strong>Persistent side session</strong> ·
   <strong>Live main-session awareness</strong> ·
@@ -79,15 +81,15 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    A[Main session keeps moving] --> B[/jarvis opens in overlay]
-    B --> C[Jarvis sees current main-session context]
-    C --> D{What do you need?}
-    D -->|Status / summary / analysis| E[Jarvis handles the side task]
-    D -->|Repo inspection| F[Enable Repo tools]
-    D -->|Influence the main lane| G[Enable Note main or Redirect]
-    G --> H{Redirect?}
-    H -->|Yes| I[Per-send confirmation]
-    H -->|No| J[Quiet follow-up note]
+    A["Main session keeps moving"] --> B["/jarvis opens in overlay"]
+    B --> C["Jarvis sees current main-session context"]
+    C --> D{"What do you need?"}
+    D -->|Status / summary / analysis| E["Jarvis handles the side task"]
+    D -->|Repo inspection| F["Enable Repo tools"]
+    D -->|Influence the main lane| G["Enable Note main or Redirect"]
+    G --> H{"Redirect?"}
+    H -->|Yes| I["Per-send confirmation"]
+    H -->|No| J["Quiet follow-up note"]
 ```
 
 ---
@@ -192,17 +194,18 @@ The `/jarvis` input handles a small set of built-in commands against the isolate
 ```mermaid
 flowchart TD
     A[Project config\n.pi/jarvis.json] -->|if present| B{valid?}
-    B -->|yes| P[Use project selection]
+    B -->|yes| P[Use project overrides]
     B -->|no or missing| C[Global config\n&lt;agentDir&gt;/extensions/pi-jarvis.json]
     C -->|if present| D{valid?}
-    D -->|yes| G[Use global selection]
-    D -->|no or missing| E[Built-in default]
-    E --> F[follow-main]
+    D -->|yes| G[Use global overrides]
+    D -->|no or missing| E[Built-in defaults]
+    E --> F[Model default: follow-main]
+    E --> H[Thinking default: auto]
 ```
 
 ### Resolution order
 
-Both model and thinking settings resolve through the same config layers:
+Model and thinking settings resolve through the same config layers, then fall back to separate built-in defaults:
 
 1. project config: `.pi/jarvis.json`
 2. global config: `~/.pi/agent/extensions/pi-jarvis.json` or the equivalent path under a custom Pi agent dir
@@ -344,10 +347,10 @@ Build the published package contents:
 npm run build
 ```
 
-Preview the npm payload:
+Preview and verify the npm payload contract:
 
 ```bash
-npm pack --dry-run
+npm run verify:release
 ```
 
 ---

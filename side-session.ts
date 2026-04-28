@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -63,7 +64,9 @@ type SideRuntimeCreateOptions = {
 };
 
 export function getJarvisSessionDirectory(cwd: string, agentDir: string = getAgentDir()): string {
-	const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	const hash = createHash("sha256").update(cwd).digest("hex").slice(0, 16);
+	const readablePath = cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-").slice(0, 80);
+	const safePath = `--${hash}-${readablePath}--`;
 	const sessionDir = join(agentDir, "jarvis-sessions", safePath);
 	mkdirSync(sessionDir, { recursive: true });
 	return sessionDir;
@@ -636,6 +639,9 @@ function createSideExtensionFactory(
 		if (currentMainContext.summary.latestUserRequest && currentMainContext.summary.latestUserRequest !== previousMainContext.summary.latestUserRequest) {
 			changes.push(`- New main request: ${currentMainContext.summary.latestUserRequest}`);
 		}
+		if (currentMainContext.summary.latestAssistantText && currentMainContext.summary.latestAssistantText !== previousMainContext.summary.latestAssistantText) {
+			changes.push(`- New assistant update: ${currentMainContext.summary.latestAssistantText}`);
+		}
 
 		return [
 			"Changes since the last /jarvis turn:",
@@ -867,16 +873,34 @@ function sanitizeAssistantOverlayText(text: string): string {
 	const normalizedLines = text.replace(/\r/g, "").split("\n").map((line) => line.trimEnd());
 	const visibleLines: string[] = [];
 	let skippingToolArguments = false;
+	let toolArgumentBraceDepth = 0;
+	let sawToolArgumentJson = false;
 
 	for (const line of normalizedLines) {
 		const trimmed = line.trim();
 		if (isLeakedAssistantToolLine(trimmed)) {
 			skippingToolArguments = true;
+			toolArgumentBraceDepth = 0;
+			sawToolArgumentJson = false;
 			continue;
 		}
 		if (skippingToolArguments) {
 			if (!trimmed) {
 				skippingToolArguments = false;
+				toolArgumentBraceDepth = 0;
+				sawToolArgumentJson = false;
+				continue;
+			}
+			if (!sawToolArgumentJson && !isLikelyLeakedToolArgumentLine(trimmed)) {
+				skippingToolArguments = false;
+				visibleLines.push(line);
+				continue;
+			}
+			sawToolArgumentJson = true;
+			toolArgumentBraceDepth = updateJsonBraceDepth(toolArgumentBraceDepth, trimmed);
+			if (toolArgumentBraceDepth <= 0 && /[}\]]\s*,?$/.test(trimmed)) {
+				skippingToolArguments = false;
+				sawToolArgumentJson = false;
 			}
 			continue;
 		}
@@ -892,6 +916,40 @@ function isLeakedAssistantToolLine(line: string): boolean {
 		return false;
 	}
 	return /^to=(?:read|write|edit|bash|mcp|grep|find|ls)\b/i.test(trimmed);
+}
+
+function isLikelyLeakedToolArgumentLine(line: string): boolean {
+	const trimmed = line.trim();
+	return /^[{[]/.test(trimmed) || /^[}\]],?$/.test(trimmed) || /^"?(?:filePath|path|command|pattern|content|output|options|offset|limit|args|tool|search|describe|connect)"?\s*:/i.test(trimmed);
+}
+
+function updateJsonBraceDepth(currentDepth: number, line: string): number {
+	let depth = currentDepth;
+	let inString = false;
+	let escaping = false;
+	for (const char of line) {
+		if (escaping) {
+			escaping = false;
+			continue;
+		}
+		if (char === "\\" && inString) {
+			escaping = true;
+			continue;
+		}
+		if (char === '"') {
+			inString = !inString;
+			continue;
+		}
+		if (inString) {
+			continue;
+		}
+		if (char === "{" || char === "[") {
+			depth += 1;
+		} else if (char === "}" || char === "]") {
+			depth -= 1;
+		}
+	}
+	return depth;
 }
 
 function isLeakedAssistantToolParagraph(paragraph: string): boolean {

@@ -170,7 +170,7 @@ export class JarvisOverlayComponent implements Component, Focusable {
 		private readonly view: JarvisOverlayView,
 		private readonly close: () => void,
 	) {
-		this.maxHeightProvider = () => Math.max(18, Math.floor(this.tui.terminal.rows * 0.78));
+		this.maxHeightProvider = () => Math.max(3, Math.floor(this.tui.terminal.rows * 0.78));
 
 		this.input.onSubmit = (value) => {
 			const message = value.trim();

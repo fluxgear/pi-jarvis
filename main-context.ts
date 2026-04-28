@@ -246,7 +246,7 @@ function findLatestValidationEntry(branchEntries: MainSessionSnapshot["branchEnt
 			continue;
 		}
 		const command = normalizeText(entry.message.command);
-		if (command === "npm run check" || command === "npm test" || command === "npm run build" || command === "npm pack --dry-run") {
+		if (classifyValidationCommand(command)) {
 			return entry as BashExecutionEntry;
 		}
 	}
@@ -404,11 +404,81 @@ function getActiveValidationCommand(runningToolCalls: readonly MainSessionSnapsh
 			continue;
 		}
 		const command = typeof toolCall.args?.command === "string" ? normalizeText(toolCall.args.command) : "";
-		if (command === "npm run check" || command === "npm test" || command === "npm run build" || command === "npm pack --dry-run") {
-			return command;
+		const classifiedCommand = classifyValidationCommand(command);
+		if (classifiedCommand) {
+			return classifiedCommand;
 		}
 	}
 	return undefined;
+}
+
+function classifyValidationCommand(command: string): string | undefined {
+	const normalizedCommand = normalizeText(command);
+	if (!normalizedCommand) {
+		return undefined;
+	}
+
+	for (const segment of splitShellCommandSegments(normalizedCommand)) {
+		const strippedSegment = stripShellPrefix(segment);
+		if (!strippedSegment || strippedSegment.startsWith("cd ")) {
+			continue;
+		}
+		if (isValidationSegment(strippedSegment)) {
+			return normalizedCommand;
+		}
+	}
+
+	return undefined;
+}
+
+function splitShellCommandSegments(command: string): string[] {
+	return command
+		.split(/\s*(?:&&|;)\s*/g)
+		.map((segment) => normalizeText(segment))
+		.filter((segment): segment is string => Boolean(segment));
+}
+
+function stripShellPrefix(segment: string): string {
+	let normalized = normalizeText(segment);
+	let previous = "";
+	while (normalized && normalized !== previous) {
+		previous = normalized;
+		normalized = normalizeText(
+			normalized
+				.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)+/, "")
+				.replace(/^(?:\/usr\/bin\/|\/bin\/)?env\s+/, "")
+				.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)+/, ""),
+		);
+	}
+	return normalized;
+}
+
+function isValidationSegment(segment: string): boolean {
+	if (/^npm\s+test(?:\s|$)/.test(segment)) {
+		return true;
+	}
+	if (/^npm\s+run\s+check(?:\s|$)/.test(segment)) {
+		return true;
+	}
+	if (/^npm\s+run\s+build(?:\s|$)/.test(segment)) {
+		return true;
+	}
+	if (/^npm\s+run\s+verify:release(?:\s|$)/.test(segment)) {
+		return true;
+	}
+	if (/^npm\s+pack(?:\s|$)/.test(segment) && /(?:^|\s)--dry-run(?:[=\s]|$)/.test(segment)) {
+		return true;
+	}
+	if (/^(?:npx\s+)?tsc(?:\s|$)/.test(segment) && /(?:^|\s)--noEmit(?:\s|$)/.test(segment)) {
+		return true;
+	}
+	if (/^(?:npx\s+)?tsc(?:\s|$)/.test(segment) && /(?:^|\s)(?:-p|--project)\s+tsconfig\.build\.json(?:\s|$)/.test(segment)) {
+		return true;
+	}
+	if (/^node(?:\s|$)/.test(segment) && /\btest\/jarvis\.test\.ts(?:\s|$)/.test(segment)) {
+		return true;
+	}
+	return false;
 }
 
 function extractFilesFromSessionEntry(entry: SessionEntry): string[] {

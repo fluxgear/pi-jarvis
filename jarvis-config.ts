@@ -57,7 +57,7 @@ export function saveJarvisModelSelectionSetting(
 	agentDir: string = getAgentDir(),
 ): void {
 	const path = getJarvisConfigPath(cwd, scope, agentDir);
-	const config = existsSync(path) ? readJarvisConfigFile(path) : {};
+	const config = readExistingJarvisConfigFileForWrite(path);
 	config.modelSelection = selection;
 	writeJarvisConfigFile(path, config);
 }
@@ -99,7 +99,7 @@ export function saveJarvisThinkingSelectionSetting(
 	agentDir: string = getAgentDir(),
 ): void {
 	const path = getJarvisConfigPath(cwd, scope, agentDir);
-	const config = existsSync(path) ? readJarvisConfigFile(path) : {};
+	const config = readExistingJarvisConfigFileForWrite(path);
 	config.thinkingSelection = selection;
 	writeJarvisConfigFile(path, config);
 }
@@ -153,6 +153,17 @@ function readJarvisConfigFile(path: string): JarvisConfigFile {
 	}
 
 	return { ...(raw as Record<string, unknown>) };
+}
+
+function readExistingJarvisConfigFileForWrite(path: string): JarvisConfigFile {
+	if (!existsSync(path)) {
+		return {};
+	}
+	try {
+		return readJarvisConfigFile(path);
+	} catch {
+		return {};
+	}
 }
 
 function writeJarvisConfigFile(path: string, config: JarvisConfigFile): void {
