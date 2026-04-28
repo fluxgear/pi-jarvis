@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > Historical note: releases before the `pi-jarvis` 1.x line refer to the project's earlier `pi-btw` and `/btw` naming. Those entries are preserved as historical release records and do not describe the current product name or command surface.
 
+## [1.3.2] - 2026-04-28
+
+### Fixed
+- Reduced the default npm install footprint by keeping Pi host packages and `pi-mcp-adapter` as optional peer dependencies instead of installing the full Pi/AI/MCP dependency stack with `pi-jarvis`.
+
+### Changed
+- Documented optional MCP adapter behavior and added package-manifest regression coverage for the lightweight install contract.
+
 ## [1.3.0] - 2026-04-27
 
 ### Added

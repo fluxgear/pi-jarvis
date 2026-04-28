@@ -13,7 +13,7 @@
 [![Pi extension](https://img.shields.io/badge/Pi-extension-06b6d4?style=for-the-badge)](https://github.com/fluxgear/pi-jarvis)
 [![TypeScript](https://img.shields.io/badge/TypeScript-powered-2563eb?style=for-the-badge)](./package.json)
 
-<p><strong>Current version:</strong> 1.3.1</p>
+<p><strong>Current version:</strong> 1.3.2</p>
 
 <p>
   <strong>Persistent side session</strong> ·
@@ -119,6 +119,10 @@ Stay in the main lane when you want:
 npm install pi-jarvis
 ```
 
+This package is meant to run **inside a Pi installation** that already provides the Pi runtime packages. Those host packages are declared as optional peers so npm does not install a second copy of the full Pi/AI provider stack just to add this extension.
+
+MCP support is optional. If you want the `/jarvis` Repo tools toggle to expose the `mcp` tool, install `pi-mcp-adapter` in the same Pi environment; otherwise `/jarvis` still enables local `read`, `bash`, `edit`, and `write` tools when you opt in.
+
 ### 2) Register the extension in Pi
 
 Use the package's published extension entrypoint:
@@ -126,9 +130,6 @@ Use the package's published extension entrypoint:
 ```text
 ./dist/index.js
 ```
-
-This package is meant to run **inside a Pi installation** that provides the required peer dependencies.
-
 ### 3) Open Jarvis
 
 ```bash

@@ -2039,17 +2039,28 @@ async function testPackageManifestDeclaresPiPeerDependencies(): Promise<void> {
 		types?: string;
 		files?: string[];
 		exports?: Record<string, unknown>;
+		dependencies?: Record<string, string>;
 		peerDependencies?: Record<string, string>;
+		peerDependenciesMeta?: Record<string, { optional?: boolean }>;
 		pi?: {
 			extensions?: string[];
 		};
 	};
 
 	const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as PackageManifest;
+	assert.equal(packageJson.dependencies?.["pi-mcp-adapter"], undefined, "pi-mcp-adapter must remain optional so installing pi-jarvis does not pull the MCP/Pi dependency stack");
 	const peerDependencies = packageJson.peerDependencies ?? {};
 	assert.equal(peerDependencies["@mariozechner/pi-ai"], "*", "package.json must declare @mariozechner/pi-ai as a peer dependency for published Pi packages");
 	assert.equal(peerDependencies["@mariozechner/pi-coding-agent"], "*", "package.json must declare @mariozechner/pi-coding-agent as a peer dependency for published Pi packages");
 	assert.equal(peerDependencies["@mariozechner/pi-tui"], "*", "package.json must declare @mariozechner/pi-tui as a peer dependency for published Pi packages");
+	assert.equal(peerDependencies["pi-mcp-adapter"], "^2.2.1", "package.json should advertise the optional MCP adapter peer without forcing installation");
+	for (const optionalPeer of ["@mariozechner/pi-ai", "@mariozechner/pi-coding-agent", "@mariozechner/pi-tui", "pi-mcp-adapter"]) {
+		assert.equal(
+			packageJson.peerDependenciesMeta?.[optionalPeer]?.optional,
+			true,
+			`${optionalPeer} should be marked optional so npm does not auto-install host-provided Pi packages`,
+		);
+	}
 	assert.equal(packageJson.main, "./dist/index.js", "package.json must point main at the published dist entrypoint");
 	assert.equal(packageJson.types, "./dist/index.d.ts", "package.json must point types at the published dist declaration file");
 	const publishedFiles = new Set(packageJson.files ?? []);
